@@ -2,13 +2,13 @@
 export class DomainError extends Error {
   readonly code: string;
   readonly httpStatus: number;
-  readonly sodViolationCode?: "S1" | "S2" | "S3";
+  readonly sodViolationCode?: "S1" | "S2" | "S3" | "S5";
 
   constructor(
     code: string,
     message: string,
     httpStatus = 400,
-    sodViolationCode?: "S1" | "S2" | "S3",
+    sodViolationCode?: "S1" | "S2" | "S3" | "S5",
   ) {
     super(message);
     this.name = "DomainError";

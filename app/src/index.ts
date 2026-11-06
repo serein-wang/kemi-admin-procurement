@@ -1,5 +1,6 @@
-export { loadAppEnv, loadThresholds, loadDotEnv } from "./config.js";
-export { emptyThresholds, THRESHOLD_KEYS } from "./domain/thresholds.js";
+export { loadAppEnv, loadThresholds, loadPrepayPolicy, loadDotEnv } from "./config.js";
+export { emptyThresholds, emptyPrepayPolicy, THRESHOLD_KEYS } from "./domain/thresholds.js";
+export type { PrepayPolicy } from "./domain/thresholds.js";
 export { DomainError } from "./domain/errors.js";
 export { ErpProInboundStub } from "./erp/inbound.js";
 export type { AdminInboundRequest, ErpProInboundPort } from "./erp/inbound.js";

@@ -14,6 +14,12 @@ export const THRESHOLD_KEYS = [
   "THR_HKD_RFQ",
   "THR_CNY_CAPEX",
   "THR_HKD_CAPEX",
+  "THR_CNY_PREPAY_FIN",
+  "THR_CNY_PREPAY_CEO",
+  "THR_HKD_PREPAY_FIN",
+  "THR_HKD_PREPAY_CEO",
+  "THR_CNY_PREPAY_CONTRACT",
+  "THR_HKD_PREPAY_CONTRACT",
 ] as const;
 
 export type ThresholdKey = (typeof THRESHOLD_KEYS)[number];
@@ -31,7 +37,34 @@ export function emptyThresholds(): ThresholdConfig {
     THR_HKD_RFQ: null,
     THR_CNY_CAPEX: null,
     THR_HKD_CAPEX: null,
+    THR_CNY_PREPAY_FIN: null,
+    THR_CNY_PREPAY_CEO: null,
+    THR_HKD_PREPAY_FIN: null,
+    THR_HKD_PREPAY_CEO: null,
+    THR_CNY_PREPAY_CONTRACT: null,
+    THR_HKD_PREPAY_CONTRACT: null,
   };
+}
+
+/**
+ * 预付政策里的非金额开关（Q9 / Q10）。
+ * 比例空着就是未配置。全额预付默认关闭。继承请购矩阵默认关闭。
+ */
+export interface PrepayPolicy {
+  ratioMax: string | null;
+  allowFullPrepay: boolean;
+  inheritPrMatrix: boolean;
+}
+
+export function emptyPrepayPolicy(): PrepayPolicy {
+  return { ratioMax: null, allowFullPrepay: false, inheritPrMatrix: false };
+}
+
+export type PrepayThresholdKind = "fin" | "ceo" | "contract";
+
+export function prepayThresholdKey(currency: CurrencyCode, kind: PrepayThresholdKind): ThresholdKey {
+  const suffix = kind === "fin" ? "PREPAY_FIN" : kind === "ceo" ? "PREPAY_CEO" : "PREPAY_CONTRACT";
+  return `THR_${currency}_${suffix}`;
 }
 
 export function thresholdKey(currency: CurrencyCode, kind: ThresholdKind): ThresholdKey {

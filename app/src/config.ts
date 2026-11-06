@@ -1,9 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { DomainError } from "./domain/errors.js";
-import { parseAmount } from "./domain/money.js";
+import { parseAmount, parseRatio } from "./domain/money.js";
 import {
   THRESHOLD_KEYS,
+  emptyPrepayPolicy,
   emptyThresholds,
+  type PrepayPolicy,
   type ThresholdConfig,
   type ThresholdKey,
 } from "./domain/thresholds.js";
@@ -61,6 +63,27 @@ export function loadThresholds(env: NodeJS.ProcessEnv): ThresholdConfig {
   return config;
 }
 
+/** 空值与占位符都是未配置。不给比例填默认数字。 */
+export function loadPrepayPolicy(env: NodeJS.ProcessEnv): PrepayPolicy {
+  const policy = emptyPrepayPolicy();
+  const raw = env.PREPAY_RATIO_MAX;
+  const text = raw?.trim() ?? "";
+  if (text && text.toUpperCase() !== "PLACEHOLDER" && text !== "PREPAY_RATIO_MAX") {
+    try {
+      parseRatio(text);
+    } catch (error) {
+      if (error instanceof DomainError) {
+        throw new DomainError("THRESHOLD_CONFIG_INVALID", "PREPAY_RATIO_MAX 不是合法比例", 422);
+      }
+      throw error;
+    }
+    policy.ratioMax = text;
+  }
+  policy.allowFullPrepay = env.ALLOW_FULL_PREPAY === "true";
+  policy.inheritPrMatrix = env.PREPAY_INHERIT_PR_MATRIX === "true";
+  return policy;
+}
+
 export interface AppEnv {
   port: number;
   host: string;
@@ -68,6 +91,7 @@ export interface AppEnv {
   allowDevLogin: boolean;
   seedDemoUsers: boolean;
   thresholds: ThresholdConfig;
+  prepayPolicy: PrepayPolicy;
   oidc: {
     clientId: string;
     clientSecret: string;
@@ -92,6 +116,7 @@ export function loadAppEnv(env: NodeJS.ProcessEnv = process.env): AppEnv {
     allowDevLogin: env.ALLOW_DEV_LOGIN === "true",
     seedDemoUsers: env.SEED_DEMO_USERS !== "false",
     thresholds: loadThresholds(env),
+    prepayPolicy: loadPrepayPolicy(env),
     oidc: {
       clientId: env.KEMI_CLIENT_ID ?? "",
       clientSecret: env.KEMI_CLIENT_SECRET ?? "",

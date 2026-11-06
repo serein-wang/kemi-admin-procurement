@@ -1,11 +1,23 @@
 import { parseCategory } from "../domain/categories.js";
 import { DomainError } from "../domain/errors.js";
-import { addAmount, compareAmount, lineAmount, parseAmount } from "../domain/money.js";
+import {
+  addAmount,
+  compareAmount,
+  formatRatio,
+  lineAmount,
+  parseAmount,
+  subtractAmount,
+  withinRatio,
+} from "../domain/money.js";
 import { isRole, type Role } from "../domain/roles.js";
 import {
   approvalBand,
+  prepayThresholdKey,
   thresholdKey,
+  type ApprovalBand,
   type CurrencyCode,
+  type PrepayPolicy,
+  type PrepayThresholdKind,
   type ThresholdConfig,
   type ThresholdKind,
 } from "../domain/thresholds.js";
@@ -14,12 +26,16 @@ import type {
   AuditLog,
   CompanyCode,
   CreatePrInput,
+  Dp2Result,
   Grn,
   InvoiceRegister,
   MatchSheet,
   Payment,
-  PaymentTermsInput,
-  Phase1PaymentTerms,
+  PaymentTerms,
+  PrepayAttachment,
+  PrepayRefund,
+  PrepayRequest,
+  PrepaySettle,
   PrLine,
   PublicUser,
   PurchaseOrder,
@@ -34,24 +50,28 @@ import { MemoryStore } from "../store/memory.js";
 export interface ServiceDeps {
   store: MemoryStore;
   thresholds: ThresholdConfig;
+  prepayPolicy: PrepayPolicy;
   erp: ErpProInboundPort;
   clock?: () => Date;
 }
 
 /**
- * 路径①货到付款 / 月结。状态以 docs/02、docs/06 为准。
+ * 路径①货到付款 / 月结 / 预付（①-P1…①-P10）。
+ * 状态以 docs/02、docs/03、docs/06 为准。
  * SoD 在迁移前拒绝，不提供绕过。
- * 阶段 1 不做预付、报销、金蝶回写。
+ * 不做 ①-E*、报销、金蝶回写。入库仍走行政物资 stub。
  */
 export class ProcurementService {
   private readonly store: MemoryStore;
   private readonly thresholds: ThresholdConfig;
+  private readonly prepayPolicy: PrepayPolicy;
   private readonly erp: ErpProInboundPort;
   private readonly clock: () => Date;
 
   constructor(deps: ServiceDeps) {
     this.store = deps.store;
     this.thresholds = deps.thresholds;
+    this.prepayPolicy = deps.prepayPolicy;
     this.erp = deps.erp;
     this.clock = deps.clock ?? (() => new Date());
   }
@@ -458,7 +478,7 @@ export class ProcurementService {
       }
       days = value!;
     } else if (input.paymentTermsDays != null) {
-      this.fail("INVALID_TERMS", "货到付款不填写账期天数");
+      this.fail("INVALID_TERMS", "只有月结填写账期天数");
     }
     const quote = this.store.quoteByPr(pr.id);
     let vendorId: string;
@@ -502,14 +522,15 @@ export class ProcurementService {
       comment: "①-6 下行政采购单",
       skipped: false,
     });
-    po.status = "awaiting_receipt";
+    const parked = terms === "prepay" ? "awaiting_prepay" : "awaiting_receipt";
+    po.status = parked;
     this.audit({
       entity: "PO",
       entityId: po.id,
       fromStatus: "issued",
-      toStatus: "awaiting_receipt",
+      toStatus: parked,
       actorId: actor.id,
-      comment: `D6=${terms}，阶段 1 不进入预付`,
+      comment: terms === "prepay" ? "D6=prepay，进入待预付" : `D6=${terms}，待收货`,
       skipped: false,
     });
     pr.status = "closed_converted";
@@ -719,18 +740,25 @@ export class ProcurementService {
     this.requireRole(actor, "finance");
     if (po.status !== "fully_received") this.fail("INVALID_STATE", "须完成收货且尚未匹配才能登记发票", 409);
     if (!po.dispositionDone) this.fail("DISPOSITION_PENDING", "请先完成 ①-8a 建卡或 ①-8b 费用化", 409);
-    if (this.store.invoiceByPo(po.id)) this.fail("INVALID_STATE", "该采购单已登记发票", 409);
+    if (this.store.invoiceByPo(po.id)) this.fail("INVALID_STATE", "该采购单已登记正式发票", 409);
     const invoiceNo = this.requiredText(input.invoiceNo, "发票号码");
-    for (const existing of this.store.invoices.values()) {
-      if (existing.invoiceNo === invoiceNo) this.fail("DUPLICATE_INVOICE", "发票号码已存在", 409);
+    this.assertInvoiceNoFree(invoiceNo);
+    if (input.invoiceType === "proforma") {
+      this.fail("PROFORMA_NOT_FOR_SETTLEMENT", "形式发票只能用于启动预付，不能作为①-9正式进项发票", 422);
     }
-    const invoiceType = input.invoiceType === "special" || input.invoiceType === "general"
-      ? input.invoiceType
-      : null;
-    if (!invoiceType) this.fail("INVALID_INVOICE", "发票类型仅为 special 或 general");
+    const invoiceType = input.invoiceType === "special" || input.invoiceType === "general" ? input.invoiceType : null;
+    if (!invoiceType) this.fail("INVALID_INVOICE", "发票类型仅为 special、general 或 proforma");
     parseAmount(input.tax);
     const amount = formatStored(input.amount);
-    if (compareAmount(amount, po.amount) !== 0) {
+    if (compareAmount(amount, "0.00") <= 0) this.fail("INVALID_AMOUNT", "发票金额必须大于 0");
+    let formalOf: string | null = null;
+    if (po.paymentTerms === "prepay") {
+      const prepay = this.livePrepay(po.id);
+      if (!prepay || prepay.status !== "awaiting_delivery") {
+        this.fail("INVALID_STATE", "预付尚未挂账待到货，不能登记正式发票", 409);
+      }
+      formalOf = prepay.proformaInvoiceId;
+    } else if (compareAmount(amount, po.amount) !== 0) {
       this.fail("MATCH_AMOUNT_MISMATCH", "发票金额必须等于采购单金额。本期不设容差阈值", 422);
     }
     const now = this.now();
@@ -740,6 +768,8 @@ export class ProcurementService {
       docNo: id,
       invoiceNo,
       invoiceType,
+      kind: "formal",
+      formalOf,
       amount,
       tax: formatStored(input.tax),
       poId: po.id,
@@ -753,7 +783,7 @@ export class ProcurementService {
       fromStatus: null,
       toStatus: "registered",
       actorId: actor.id,
-      comment: "①-9 登记进项发票",
+      comment: formalOf ? "①-9 登记正式进项发票，并保留形式发票关联" : "①-9 登记进项发票",
       skipped: false,
     });
     return clone(invoice);
@@ -766,10 +796,27 @@ export class ProcurementService {
     if (po.status !== "fully_received") this.fail("INVALID_STATE", "采购单尚未处于可匹配状态", 409);
     if (!po.dispositionDone) this.fail("DISPOSITION_PENDING", "请先完成 ①-8a 或 ①-8b", 409);
     const invoice = this.store.invoiceByPo(po.id);
-    if (!invoice) this.fail("INVALID_STATE", "尚未登记发票", 409);
+    if (!invoice) {
+      if (po.paymentTerms === "prepay" && this.livePrepay(po.id)?.proformaInvoiceId) {
+        this.fail("FORMAL_INVOICE_REQUIRED", "三单匹配与核销必须以正式进项发票为准", 422);
+      }
+      this.fail("INVALID_STATE", "尚未登记发票", 409);
+    }
+    if (invoice.kind !== "formal") {
+      this.fail("FORMAL_INVOICE_REQUIRED", "三单匹配与核销必须以正式进项发票为准", 422);
+    }
     const grns = this.confirmedGrns(po);
-    if (grns.length !== 1) this.fail("INVALID_STATE", "阶段 1 匹配需要恰好一张已确认收货单", 409);
-    if (compareAmount(invoice.amount, po.amount) !== 0) {
+    if (grns.length !== 1) this.fail("INVALID_STATE", "匹配需要恰好一张已确认收货单", 409);
+    let prepayId: string | null = null;
+    let prepayAmount: string | null = null;
+    if (po.paymentTerms === "prepay") {
+      const prepay = this.livePrepay(po.id);
+      if (!prepay || prepay.status !== "awaiting_delivery") {
+        this.fail("INVALID_STATE", "预付尚未挂账待到货，不能匹配", 409);
+      }
+      prepayId = prepay.id;
+      prepayAmount = prepay.amount;
+    } else if (compareAmount(invoice.amount, po.amount) !== 0) {
       this.fail("MATCH_AMOUNT_MISMATCH", "三单金额不一致", 422);
     }
     const now = this.now();
@@ -780,6 +827,8 @@ export class ProcurementService {
       poId: po.id,
       grnId: grns[0]!.id,
       invoiceId: invoice.id,
+      prepayId,
+      prepayAmount,
       matchResult: "matched",
       matchedBy: actor.id,
       createdAt: now,
@@ -794,7 +843,9 @@ export class ProcurementService {
       fromStatus: null,
       toStatus: "matched",
       actorId: actor.id,
-      comment: "①-10 三单匹配通过；匹配人记为记账人",
+      comment: prepayId
+        ? "①-10 三单匹配通过；已核对预付额，正式发票。匹配人记为记账人"
+        : "①-10 三单匹配通过；匹配人记为记账人",
       skipped: false,
     });
     this.audit({
@@ -813,21 +864,66 @@ export class ProcurementService {
     const actor = this.requireUser(actorId);
     const po = this.po(poId);
     this.requireRole(actor, "admin");
+    const live = this.livePrepay(po.id);
+    if (po.paymentTerms === "prepay" || live) {
+      return this.requestTailOrReject(actor, po, live);
+    }
     if (po.status !== "matched") this.fail("INVALID_STATE", "须三单匹配后才能发起付款", 409);
     if (this.store.paymentByPo(po.id)) this.fail("INVALID_STATE", "付款申请已存在", 409);
     const match = this.store.matchByPo(po.id);
     if (!match) this.fail("INVALID_STATE", "缺少匹配单", 409);
+    return this.openPayment(actor, po, match, "po_balance", po.amount, "①-11 发起付款申请");
+  }
+
+  private requestTailOrReject(
+    actor: User,
+    po: PurchaseOrder,
+    live: PrepayRequest | undefined,
+  ): Payment {
+    const settle = live ? this.store.settleByPrepay(live.id) : undefined;
+    const tailOk = live?.status === "settled_with_balance" && settle?.dp2Result === "short";
+    if (!tailOk || !live || !settle) {
+      this.fail(
+        "FULL_PAYMENT_EXCLUSIVE",
+        "预付与全款付款互斥。未核销为尾款前不能付款，也不能按采购单全额另付一笔",
+        409,
+      );
+    }
+    if (this.store.paymentByPo(po.id)) {
+      this.fail("FULL_PAYMENT_EXCLUSIVE", "该采购单已有付款申请，不能重复支付", 409);
+    }
+    if (po.status !== "matched") this.fail("INVALID_STATE", "须三单匹配后才能发起尾款", 409);
+    const invoice = this.store.invoiceByPo(po.id);
+    const match = this.store.matchByPo(po.id);
+    if (!invoice || !match) this.fail("INVALID_STATE", "缺少正式发票或匹配单", 409);
+    const tail = subtractAmount(invoice.amount, live.amount);
+    if (compareAmount(tail, "0.00") <= 0) {
+      this.fail("FULL_PAYMENT_EXCLUSIVE", "没有应付尾款", 409);
+    }
+    const payment = this.openPayment(actor, po, match, "prepay_tail", tail, "①-P9 发起尾款（复用①-11）");
+    settle.tailPayId = payment.id;
+    return payment;
+  }
+
+  private openPayment(
+    actor: User,
+    po: PurchaseOrder,
+    match: MatchSheet,
+    sourceType: Payment["sourceType"],
+    amount: string,
+    comment: string,
+  ): Payment {
     const now = this.now();
     const id = this.store.nextId("PAY");
     const payment: Payment = {
       id,
       docNo: id,
-      sourceType: "po_balance",
+      sourceType,
       poId: po.id,
       matchId: match.id,
       companyCode: po.companyCode,
       currency: po.currency,
-      amount: po.amount,
+      amount,
       status: "submitted",
       requestedBy: actor.id,
       financeApproverId: null,
@@ -849,7 +945,7 @@ export class ProcurementService {
       fromStatus: null,
       toStatus: "submitted",
       actorId: actor.id,
-      comment: "①-11 发起付款申请",
+      comment,
       skipped: false,
     });
     this.audit({
@@ -858,7 +954,7 @@ export class ProcurementService {
       fromStatus: from,
       toStatus: "payment_pending",
       actorId: actor.id,
-      comment: "采购单待付款",
+      comment: sourceType === "prepay_tail" ? "采购单待付尾款" : "采购单待付款",
       skipped: false,
     });
     return clone(payment);
@@ -878,7 +974,9 @@ export class ProcurementService {
       fromStatus: "submitted",
       toStatus: "finance_approved",
       actorId: actor.id,
-      comment: "①-12 财务批准付款。总经理是否复用请购高额档仍待确认，本期不另加节点",
+      comment: payment.sourceType === "prepay_tail"
+        ? "①-12 财务批准尾款（①-P9）。总经理是否复用请购高额档仍待确认，本期不另加节点"
+        : "①-12 财务批准付款。总经理是否复用请购高额档仍待确认，本期不另加节点",
       skipped: false,
     });
     return clone(payment);
@@ -910,13 +1008,14 @@ export class ProcurementService {
     const from = po.status;
     po.status = "paid";
     po.updatedAt = payment.paidAt;
+    const tail = payment.sourceType === "prepay_tail";
     this.audit({
       entity: "PAY",
       entityId: payment.id,
       fromStatus: "finance_approved",
       toStatus: "paid",
       actorId: actor.id,
-      comment: "①-13 出纳付款",
+      comment: tail ? "①-13 出纳付尾款（①-P9）" : "①-13 出纳付款",
       skipped: false,
     });
     this.audit({
@@ -925,10 +1024,545 @@ export class ProcurementService {
       fromStatus: from,
       toStatus: "paid",
       actorId: actor.id,
-      comment: "采购单已付款",
+      comment: tail ? "采购单尾款已付" : "采购单已付款",
       skipped: false,
     });
     return clone(payment);
+  }
+
+  createPrepay(
+    actorId: string,
+    input: {
+      poId: string;
+      amount: string;
+      contractNo?: string | null;
+      proforma?: { invoiceNo: string; amount: string; tax?: string } | null;
+    },
+  ): PrepayRequest {
+    const actor = this.requireUser(actorId);
+    this.requireRole(actor, "admin");
+    const po = this.po(input.poId);
+    if (po.paymentTerms !== "prepay") {
+      this.fail("PREPAY_TERMS_REQUIRED", "只有 D6=prepay 的采购单可以提预付", 409);
+    }
+    if (po.status !== "awaiting_prepay") this.fail("INVALID_STATE", "采购单不在待预付", 409);
+    if (this.livePrepay(po.id)) this.fail("PREPAY_OPEN", "该采购单已有未关闭的预付申请", 409);
+    if (this.store.paymentByPo(po.id)) {
+      this.fail("FULL_PAYMENT_EXCLUSIVE", "该采购单已有付款申请，不能再提预付", 409);
+    }
+    const amount = formatStored(input.amount);
+    if (compareAmount(amount, "0.00") <= 0) this.fail("INVALID_AMOUNT", "预付金额必须大于 0");
+    if (compareAmount(amount, po.amount) > 0) this.fail("PREPAY_EXCEEDS_PO", "预付金额不能超过采购单金额", 422);
+    const contractNo = this.optionalText(input.contractNo, "合同号");
+    const proforma = input.proforma ?? null;
+    if (!contractNo && !proforma) {
+      this.fail("ATTACHMENT_REQUIRED", "预付必须关联采购单，并附合同或形式发票之一", 422);
+    }
+    const now = this.now();
+    let proformaInvoiceId: string | null = null;
+    const attachments: PrepayAttachment[] = [{ kind: "po", ref: po.docNo }];
+    if (contractNo) attachments.push({ kind: "contract", ref: contractNo });
+    if (proforma) {
+      proformaInvoiceId = this.addProforma(actor, po, proforma, now);
+      const stored = this.store.invoices.get(proformaInvoiceId)!;
+      attachments.push({ kind: "proforma", ref: stored.invoiceNo });
+    }
+    const id = this.store.nextId("PPY");
+    const prepay: PrepayRequest = {
+      id,
+      docNo: id,
+      poId: po.id,
+      companyCode: po.companyCode,
+      currency: po.currency,
+      amount,
+      ratio: null,
+      status: "draft",
+      applicantId: actor.id,
+      deptApproverId: null,
+      financeCosignerId: null,
+      ceoApproverId: null,
+      paymentApproverId: null,
+      payerId: null,
+      bankRef: null,
+      accrualBy: null,
+      accrualVoucherRef: null,
+      financeGate: "pending",
+      ceoGate: "pending",
+      fullPrepay: false,
+      attachments,
+      contractNo,
+      proformaInvoiceId,
+      createdAt: now,
+      updatedAt: now,
+      createdBy: actor.id,
+    };
+    this.store.prepays.set(prepay.id, prepay);
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: null,
+      toStatus: "draft",
+      actorId: actor.id,
+      comment: "①-P1 创建预付申请草稿",
+      skipped: false,
+    });
+    return clone(prepay);
+  }
+
+  submitPrepay(actorId: string, prepayId: string): PrepayRequest {
+    const actor = this.requireUser(actorId);
+    const prepay = this.prepay(prepayId);
+    const po = this.po(prepay.poId);
+    if (actor.id !== prepay.applicantId) this.fail("FORBIDDEN_ROLE", "只有预付申请人可以提交", 403);
+    this.assertStatus(prepay.status, "draft", "预付");
+    const contractLine = this.readPrepayMoney(po.currency, "contract");
+    if (compareAmount(prepay.amount, contractLine) >= 0 && !prepay.contractNo) {
+      this.fail("CONTRACT_REQUIRED", "预付额已达合同阈值，必须附合同", 422);
+    }
+    if (!prepay.contractNo && !prepay.proformaInvoiceId) {
+      this.fail("ATTACHMENT_REQUIRED", "预付必须附合同或形式发票之一", 422);
+    }
+    const full = compareAmount(prepay.amount, po.amount) === 0;
+    if (full && !this.prepayPolicy.allowFullPrepay) {
+      this.fail("FULL_PREPAY_NOT_ALLOWED", "未开启全额预付。预付额必须小于采购单", 422);
+    }
+    if (!full) {
+      const ratio = this.prepayPolicy.ratioMax;
+      if (ratio == null) this.fail("THRESHOLD_NOT_CONFIGURED", "PREPAY_RATIO_MAX 仍为占位符，未注入数值", 422);
+      if (!withinRatio(prepay.amount, po.amount, ratio)) {
+        this.fail("PREPAY_RATIO_EXCEEDED", "预付比例超过 PREPAY_RATIO_MAX", 422);
+      }
+    }
+    prepay.fullPrepay = full;
+    prepay.ratio = formatRatio(prepay.amount, po.amount);
+    prepay.status = "submitted";
+    prepay.updatedAt = this.now();
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: "draft",
+      toStatus: "submitted",
+      actorId: actor.id,
+      comment: full ? "①-P1 提交全额预付" : "①-P1 提交预付申请",
+      skipped: false,
+    });
+    return clone(prepay);
+  }
+
+  approvePrepayDept(actorId: string, prepayId: string, comment?: string): PrepayRequest {
+    const actor = this.requireUser(actorId);
+    const prepay = this.prepay(prepayId);
+    this.assertStatus(prepay.status, "submitted", "预付");
+    this.requireRole(actor, "dept");
+    if (actor.id === prepay.applicantId) {
+      this.sod(actor, "PREPAY", prepay.id, prepay.status, "S3", "S3 预付申请人不得担任部门审批人");
+    }
+    const band = this.prepayBand(prepay);
+    prepay.deptApproverId = actor.id;
+    prepay.status = "dept_approved";
+    prepay.updatedAt = this.now();
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: "submitted",
+      toStatus: "dept_approved",
+      actorId: actor.id,
+      comment: this.note("①-P2 部门审批通过", comment),
+      skipped: false,
+    });
+    this.routePrepayBand(prepay, actor, band);
+    return clone(prepay);
+  }
+
+  rejectPrepayDept(actorId: string, prepayId: string, comment?: string): PrepayRequest {
+    const actor = this.requireUser(actorId);
+    const prepay = this.prepay(prepayId);
+    this.assertStatus(prepay.status, "submitted", "预付");
+    this.requireRole(actor, "dept");
+    if (actor.id === prepay.applicantId) {
+      this.sod(actor, "PREPAY", prepay.id, prepay.status, "S3", "S3 预付申请人不得担任部门审批人");
+    }
+    prepay.deptApproverId = actor.id;
+    prepay.status = "rejected";
+    prepay.updatedAt = this.now();
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: "submitted",
+      toStatus: "rejected",
+      actorId: actor.id,
+      comment: this.note("①-P2 部门驳回", comment),
+      skipped: false,
+    });
+    return clone(prepay);
+  }
+
+  approvePrepayFinance(actorId: string, prepayId: string, comment?: string): PrepayRequest {
+    const actor = this.requireUser(actorId);
+    const prepay = this.prepay(prepayId);
+    this.assertStatus(prepay.status, "dept_approved", "预付");
+    if (prepay.financeGate !== "required") this.fail("INVALID_STATE", "当前预付不需要财务加签", 409);
+    this.requireRole(actor, "finance");
+    prepay.financeCosignerId = actor.id;
+    prepay.financeGate = "approved";
+    prepay.status = "finance_cosigned";
+    prepay.updatedAt = this.now();
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: "dept_approved",
+      toStatus: "finance_cosigned",
+      actorId: actor.id,
+      comment: this.note("①-P3 财务加签通过", comment),
+      skipped: false,
+    });
+    if (prepay.ceoGate === "skipped") {
+      this.skipPrepay(prepay, actor, "finance_cosigned", "ceo_approved", "①-P4 未达预付总经理阈，跳过");
+    }
+    return clone(prepay);
+  }
+
+  approvePrepayCeo(actorId: string, prepayId: string, comment?: string): PrepayRequest {
+    const actor = this.requireUser(actorId);
+    const prepay = this.prepay(prepayId);
+    this.assertStatus(prepay.status, "finance_cosigned", "预付");
+    if (prepay.ceoGate !== "required") this.fail("INVALID_STATE", "当前预付不需要总经理审批", 409);
+    this.requireRole(actor, "ceo");
+    prepay.ceoApproverId = actor.id;
+    prepay.ceoGate = "approved";
+    prepay.status = "ceo_approved";
+    prepay.updatedAt = this.now();
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: "finance_cosigned",
+      toStatus: "ceo_approved",
+      actorId: actor.id,
+      comment: this.note("①-P4 总经理审批通过", comment),
+      skipped: false,
+    });
+    return clone(prepay);
+  }
+
+  approvePrepayPayment(actorId: string, prepayId: string): PrepayRequest {
+    const actor = this.requireUser(actorId);
+    const prepay = this.prepay(prepayId);
+    this.assertReadyForPrepayPayment(prepay);
+    this.requireRole(actor, "finance");
+    if (actor.id === prepay.applicantId) {
+      this.sod(actor, "PREPAY", prepay.id, prepay.status, "S5", "S5 预付申请人不得担任预付审批人");
+    }
+    const from = prepay.status;
+    prepay.paymentApproverId = actor.id;
+    prepay.status = "finance_payment_approved";
+    prepay.updatedAt = this.now();
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: from,
+      toStatus: "finance_payment_approved",
+      actorId: actor.id,
+      comment: "①-P5 批准预付待付",
+      skipped: false,
+    });
+    return clone(prepay);
+  }
+
+  payPrepay(actorId: string, prepayId: string, bankRef: string): PrepayRequest {
+    const actor = this.requireUser(actorId);
+    const prepay = this.prepay(prepayId);
+    this.assertStatus(prepay.status, "finance_payment_approved", "预付");
+    this.requireRole(actor, "cashier");
+    if (!prepay.paymentApproverId) this.fail("INVALID_STATE", "缺少预付审批人", 409);
+    if (actor.id === prepay.applicantId || actor.id === prepay.paymentApproverId) {
+      this.sod(actor, "PREPAY", prepay.id, prepay.status, "S5", "S5 预付申请人、预付审批人、预付付款人必须互不相同");
+    }
+    const ref = this.requiredText(bankRef, "银行回单号");
+    if (ref.length > 64) this.fail("INVALID_BANK_REF", "银行回单号过长");
+    prepay.payerId = actor.id;
+    prepay.bankRef = ref;
+    prepay.status = "paid";
+    prepay.updatedAt = this.now();
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: "finance_payment_approved",
+      toStatus: "paid",
+      actorId: actor.id,
+      comment: "①-P6 出纳付预付款",
+      skipped: false,
+    });
+    return clone(prepay);
+  }
+
+  accruePrepay(actorId: string, prepayId: string, voucherRef: string): PrepayRequest {
+    const actor = this.requireUser(actorId);
+    const prepay = this.prepay(prepayId);
+    this.assertStatus(prepay.status, "paid", "预付");
+    this.requireRole(actor, "finance");
+    const ref = this.requiredText(voucherRef, "预付凭证号");
+    if (ref.length > 64) this.fail("INVALID_INPUT", "预付凭证号过长");
+    const po = this.po(prepay.poId);
+    if (po.status !== "awaiting_prepay") this.fail("INVALID_STATE", "采购单不在待预付", 409);
+    prepay.accrualBy = actor.id;
+    prepay.accrualVoucherRef = ref;
+    prepay.status = "accrued";
+    prepay.updatedAt = this.now();
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: "paid",
+      toStatus: "accrued",
+      actorId: actor.id,
+      comment: "①-P7 记预付账款（本地凭证号，不回写金蝶）",
+      skipped: false,
+    });
+    prepay.status = "awaiting_delivery";
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: "accrued",
+      toStatus: "awaiting_delivery",
+      actorId: actor.id,
+      comment: "预付已挂账，等待到货",
+      skipped: false,
+    });
+    const from = po.status;
+    po.status = "awaiting_receipt";
+    po.updatedAt = prepay.updatedAt;
+    this.audit({
+      entity: "PO",
+      entityId: po.id,
+      fromStatus: from,
+      toStatus: "awaiting_receipt",
+      actorId: actor.id,
+      comment: "预付完成，采购单转入待收货",
+      skipped: false,
+    });
+    return clone(prepay);
+  }
+
+  settlePrepay(actorId: string, prepayId: string): PrepayRequest {
+    const actor = this.requireUser(actorId);
+    const prepay = this.prepay(prepayId);
+    this.requireRole(actor, "finance");
+    this.assertStatus(prepay.status, "awaiting_delivery", "预付");
+    if (this.store.settleByPrepay(prepay.id)) this.fail("INVALID_STATE", "预付已核销", 409);
+    const po = this.po(prepay.poId);
+    if (po.status !== "matched") this.fail("INVALID_STATE", "须三单匹配后才能核销预付", 409);
+    const match = this.store.matchByPo(po.id);
+    const invoice = this.store.invoiceByPo(po.id);
+    if (!match || !invoice || invoice.kind !== "formal") {
+      this.fail("FORMAL_INVOICE_REQUIRED", "核销必须以正式进项发票和三单匹配为准", 422);
+    }
+    if (match.prepayId !== prepay.id) this.fail("INVALID_STATE", "匹配单未核对这笔预付", 409);
+    const result = this.dp2(prepay.amount, invoice.amount);
+    const now = this.now();
+    const settleId = this.store.nextId("STL");
+    const settle: PrepaySettle = {
+      id: settleId,
+      docNo: settleId,
+      prepayId: prepay.id,
+      invoiceId: invoice.id,
+      matchId: match.id,
+      dp2Result: result,
+      tailPayId: null,
+      refundId: null,
+      createdAt: now,
+      createdBy: actor.id,
+    };
+    this.store.settles.set(settle.id, settle);
+    prepay.status = "settling";
+    prepay.updatedAt = now;
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: "awaiting_delivery",
+      toStatus: "settling",
+      actorId: actor.id,
+      comment: `①-P8 核销预付；D-P2=${result}`,
+      skipped: false,
+    });
+    this.audit({
+      entity: "SETTLE",
+      entityId: settle.id,
+      fromStatus: null,
+      toStatus: result,
+      actorId: actor.id,
+      comment: "预付核销",
+      skipped: false,
+    });
+    if (result === "equal") {
+      prepay.status = "settled_equal";
+      this.audit({
+        entity: "PREPAY",
+        entityId: prepay.id,
+        fromStatus: "settling",
+        toStatus: "settled_equal",
+        actorId: actor.id,
+        comment: "预付等于票额，无尾款",
+        skipped: false,
+      });
+      this.closePo(po, actor, "预付与票额相等，采购单关闭");
+    } else if (result === "short") {
+      prepay.status = "settled_with_balance";
+      this.audit({
+        entity: "PREPAY",
+        entityId: prepay.id,
+        fromStatus: "settling",
+        toStatus: "settled_with_balance",
+        actorId: actor.id,
+        comment: "预付小于票额，待①-P9尾款",
+        skipped: false,
+      });
+    }
+    return clone(prepay);
+  }
+
+  requestPrepayRefund(
+    actorId: string,
+    prepayId: string,
+    input: { mode: string; reasonCode?: string },
+  ): PrepayRefund {
+    const actor = this.requireUser(actorId);
+    const prepay = this.prepay(prepayId);
+    this.assertStatus(prepay.status, "settling", "预付");
+    const settle = this.store.settleByPrepay(prepay.id);
+    if (!settle || settle.dp2Result !== "over") this.fail("INVALID_STATE", "只有溢付可以退款或挂账", 409);
+    if (settle.refundId || this.store.refundByPrepay(prepay.id)) this.fail("INVALID_STATE", "溢付处理已存在", 409);
+    const invoice = this.store.invoiceByPo(prepay.poId);
+    if (!invoice) this.fail("INVALID_STATE", "缺少正式发票", 409);
+    const amount = subtractAmount(prepay.amount, invoice.amount);
+    if (compareAmount(amount, "0.00") <= 0) this.fail("INVALID_STATE", "没有溢付差额", 409);
+    const now = this.now();
+    const id = this.store.nextId("RFD");
+    let mode: PrepayRefund["mode"];
+    let status: PrepayRefund["status"];
+    let financeApproverId: string | null = null;
+    let reasonCode: string | null = null;
+    if (input.mode === "refund") {
+      this.requireRole(actor, "admin");
+      mode = "refund";
+      status = "requested";
+    } else if (input.mode === "suspense") {
+      this.requireRole(actor, "finance");
+      mode = "suspense";
+      reasonCode = this.reasonCode(input.reasonCode, "挂账原因码");
+      status = "finance_approved";
+      financeApproverId = actor.id;
+    } else {
+      this.fail("INVALID_INPUT", "溢付处理仅为 refund 或 suspense");
+    }
+    const refund: PrepayRefund = {
+      id,
+      docNo: id,
+      prepayId: prepay.id,
+      settleId: settle.id,
+      mode,
+      amount,
+      status,
+      requestedBy: actor.id,
+      financeApproverId,
+      executorId: null,
+      reasonCode,
+      bankRef: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.store.refunds.set(refund.id, refund);
+    settle.refundId = refund.id;
+    this.audit({
+      entity: "REFUND",
+      entityId: refund.id,
+      fromStatus: null,
+      toStatus: status,
+      actorId: actor.id,
+      comment: mode === "refund" ? "①-P10 行政发起退款" : `①-P10 财务负责人批准挂账，原因码 ${reasonCode}`,
+      skipped: false,
+    });
+    return clone(refund);
+  }
+
+  approvePrepayRefund(actorId: string, prepayId: string): PrepayRefund {
+    const actor = this.requireUser(actorId);
+    const refund = this.refundOf(prepayId);
+    this.requireRole(actor, "finance");
+    if (refund.mode !== "refund") this.fail("INVALID_STATE", "挂账已由财务负责人批准", 409);
+    this.assertStatus(refund.status, "requested", "退款");
+    if (actor.id === refund.requestedBy) {
+      this.fail("REFUND_SELF_APPROVAL", "退款申请人不得审批自己的退款", 409);
+    }
+    refund.financeApproverId = actor.id;
+    refund.status = "finance_approved";
+    refund.updatedAt = this.now();
+    this.audit({
+      entity: "REFUND",
+      entityId: refund.id,
+      fromStatus: "requested",
+      toStatus: "finance_approved",
+      actorId: actor.id,
+      comment: "①-P10 财务批准退款",
+      skipped: false,
+    });
+    return clone(refund);
+  }
+
+  executePrepayRefund(actorId: string, prepayId: string, bankRef?: string): PrepayRefund {
+    const actor = this.requireUser(actorId);
+    const prepay = this.prepay(prepayId);
+    const refund = this.refundOf(prepay.id);
+    this.assertStatus(refund.status, "finance_approved", "退款");
+    this.assertStatus(prepay.status, "settling", "预付");
+    if (!refund.financeApproverId) this.fail("INVALID_STATE", "缺少溢付审批人", 409);
+    let ref: string | null = null;
+    if (refund.mode === "refund") {
+      this.requireRole(actor, "cashier");
+      if (actor.id === refund.financeApproverId) {
+        this.fail("REFUND_EXECUTOR_CONFLICT", "退款审批人不得执行收款", 409);
+      }
+      ref = this.requiredText(bankRef ?? "", "银行回单号");
+      if (ref.length > 64) this.fail("INVALID_BANK_REF", "银行回单号过长");
+    } else {
+      this.requireRole(actor, "finance");
+      if ((bankRef ?? "").trim()) this.fail("INVALID_INPUT", "挂账不填写银行回单号");
+    }
+    const po = this.po(prepay.poId);
+    if (po.status !== "matched") this.fail("INVALID_STATE", "采购单不在可结清状态", 409);
+    refund.executorId = actor.id;
+    refund.bankRef = ref;
+    refund.status = "executed";
+    refund.updatedAt = this.now();
+    prepay.status = "settled_with_refund";
+    prepay.updatedAt = refund.updatedAt;
+    this.audit({
+      entity: "REFUND",
+      entityId: refund.id,
+      fromStatus: "finance_approved",
+      toStatus: "executed",
+      actorId: actor.id,
+      comment: refund.mode === "refund" ? "①-P10 出纳执行退款" : "①-P10 确认挂账",
+      skipped: false,
+    });
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: "settling",
+      toStatus: "settled_with_refund",
+      actorId: actor.id,
+      comment: refund.mode === "refund" ? "溢付已退款" : "溢付已挂账",
+      skipped: false,
+    });
+    this.closePo(po, actor, "溢付结清，采购单关闭");
+    return clone(refund);
+  }
+
+  getPrepay(id: string): { prepay: PrepayRequest; settle: PrepaySettle | null; refund: PrepayRefund | null } {
+    const prepay = this.prepay(id);
+    return {
+      prepay: clone(prepay),
+      settle: clone(this.store.settleByPrepay(prepay.id) ?? null),
+      refund: clone(this.store.refundByPrepay(prepay.id) ?? null),
+    };
   }
 
   getPr(id: string): PurchaseRequisition {
@@ -958,6 +1592,9 @@ export class ProcurementService {
     invoices: InvoiceRegister[];
     matches: MatchSheet[];
     payments: Payment[];
+    prepays: PrepayRequest[];
+    settles: PrepaySettle[];
+    refunds: PrepayRefund[];
     assets: AssetCard[];
     audits: AuditLog[];
   } {
@@ -969,9 +1606,176 @@ export class ProcurementService {
       invoices: [...this.store.invoices.values()].map((row) => clone(row)),
       matches: [...this.store.matches.values()].map((row) => clone(row)),
       payments: [...this.store.payments.values()].map((row) => clone(row)),
+      prepays: [...this.store.prepays.values()].map((row) => clone(row)),
+      settles: [...this.store.settles.values()].map((row) => clone(row)),
+      refunds: [...this.store.refunds.values()].map((row) => clone(row)),
       assets: [...this.store.assets.values()].map((row) => clone(row)),
       audits: this.store.audits.map((row) => clone(row)),
     };
+  }
+
+  private livePrepay(poId: string): PrepayRequest | undefined {
+    return this.store.livePrepayByPo(poId);
+  }
+
+  private prepay(id: string): PrepayRequest {
+    const row = this.store.prepays.get(id);
+    if (!row) this.fail("NOT_FOUND", "预付申请不存在", 404);
+    return row;
+  }
+
+  private refundOf(prepayId: string): PrepayRefund {
+    const refund = this.store.refundByPrepay(prepayId);
+    if (!refund) this.fail("NOT_FOUND", "溢付处理不存在", 404);
+    return refund;
+  }
+
+  private addProforma(
+    actor: User,
+    po: PurchaseOrder,
+    input: { invoiceNo: string; amount: string; tax?: string },
+    now: string,
+  ): string {
+    const invoiceNo = this.requiredText(input.invoiceNo, "形式发票号码");
+    this.assertInvoiceNoFree(invoiceNo);
+    const amount = formatStored(input.amount);
+    if (compareAmount(amount, "0.00") <= 0) this.fail("INVALID_AMOUNT", "形式发票金额必须大于 0");
+    const tax = formatStored(input.tax ?? "0.00");
+    const id = this.store.nextId("INV");
+    const invoice: InvoiceRegister = {
+      id,
+      docNo: id,
+      invoiceNo,
+      invoiceType: "proforma",
+      kind: "proforma",
+      formalOf: null,
+      amount,
+      tax,
+      poId: po.id,
+      createdBy: actor.id,
+      createdAt: now,
+    };
+    this.store.invoices.set(invoice.id, invoice);
+    this.audit({
+      entity: "INV",
+      entityId: invoice.id,
+      fromStatus: null,
+      toStatus: "proforma",
+      actorId: actor.id,
+      comment: "形式发票，仅用于启动预付，不能用于三单匹配或核销",
+      skipped: false,
+    });
+    return id;
+  }
+
+  private assertInvoiceNoFree(invoiceNo: string): void {
+    for (const existing of this.store.invoices.values()) {
+      if (existing.invoiceNo === invoiceNo) this.fail("DUPLICATE_INVOICE", "发票号码已存在", 409);
+    }
+  }
+
+  private prepayBand(prepay: PrepayRequest): ApprovalBand {
+    if (prepay.fullPrepay) return "high";
+    const po = this.po(prepay.poId);
+    if (this.prepayPolicy.inheritPrMatrix) {
+      return approvalBand(
+        prepay.amount,
+        this.readThreshold(po.currency, "fin"),
+        this.readThreshold(po.currency, "ceo"),
+        thresholdKey(po.currency, "fin"),
+        thresholdKey(po.currency, "ceo"),
+      );
+    }
+    return approvalBand(
+      prepay.amount,
+      this.readPrepayMoney(po.currency, "fin"),
+      this.readPrepayMoney(po.currency, "ceo"),
+      prepayThresholdKey(po.currency, "fin"),
+      prepayThresholdKey(po.currency, "ceo"),
+    );
+  }
+
+  private routePrepayBand(prepay: PrepayRequest, actor: User, band: ApprovalBand): void {
+    if (band === "low") {
+      prepay.financeGate = "skipped";
+      prepay.ceoGate = "skipped";
+      this.skipPrepay(prepay, actor, "dept_approved", "finance_cosigned", "①-P3 未达预付财务阈，跳过");
+      this.skipPrepay(prepay, actor, "finance_cosigned", "ceo_approved", "①-P4 未达预付总经理阈，跳过");
+      return;
+    }
+    if (band === "mid") {
+      prepay.financeGate = "required";
+      prepay.ceoGate = "skipped";
+      return;
+    }
+    prepay.financeGate = "required";
+    prepay.ceoGate = "required";
+  }
+
+  private skipPrepay(prepay: PrepayRequest, actor: User, fromStatus: string, toStatus: string, comment: string): void {
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus,
+      toStatus,
+      actorId: actor.id,
+      comment,
+      skipped: true,
+      skippedReason: "below_threshold",
+    });
+  }
+
+  private assertReadyForPrepayPayment(prepay: PrepayRequest): void {
+    const financeDone = prepay.financeGate === "skipped" || prepay.financeGate === "approved";
+    const ceoDone = prepay.ceoGate === "skipped" || prepay.ceoGate === "approved";
+    if (!financeDone || !ceoDone) this.fail("INVALID_STATE", "预付加签尚未完成", 409);
+    if (prepay.status !== "dept_approved" && prepay.status !== "finance_cosigned" && prepay.status !== "ceo_approved") {
+      this.fail("INVALID_STATE", `预付状态是 ${prepay.status}，不能批准付款`, 409);
+    }
+  }
+
+  private dp2(prepayAmount: string, invoiceAmount: string): Dp2Result {
+    const cmp = compareAmount(prepayAmount, invoiceAmount);
+    if (cmp === 0) return "equal";
+    if (cmp < 0) return "short";
+    return "over";
+  }
+
+  private closePo(po: PurchaseOrder, actor: User, comment: string): void {
+    const from = po.status;
+    po.status = "closed";
+    po.updatedAt = this.now();
+    this.audit({
+      entity: "PO",
+      entityId: po.id,
+      fromStatus: from,
+      toStatus: "closed",
+      actorId: actor.id,
+      comment,
+      skipped: false,
+    });
+  }
+
+  private readPrepayMoney(currency: CurrencyCode, kind: PrepayThresholdKind): string {
+    const key = prepayThresholdKey(currency, kind);
+    const value = this.thresholds[key];
+    if (value == null) this.fail("THRESHOLD_NOT_CONFIGURED", `${key} 仍为占位符，未注入数值`, 422);
+    return value;
+  }
+
+  private reasonCode(raw: string | undefined, label: string): string {
+    const reason = this.requiredText(raw ?? "", label);
+    if (!/^[A-Za-z0-9_-]{1,40}$/.test(reason)) {
+      this.fail("INVALID_REASON", `${label}仅允许字母、数字、下划线和连字符`);
+    }
+    return reason;
+  }
+
+  private optionalText(raw: string | null | undefined, label: string): string | null {
+    const text = (raw ?? "").trim();
+    if (!text) return null;
+    if (text.length > 200) this.fail("INVALID_INPUT", `${label}过长`);
+    return text;
   }
 
   private enterSourcing(pr: PurchaseRequisition, actor: User, fromStatus: PurchaseRequisition["status"]): void {
@@ -1117,12 +1921,8 @@ export class ProcurementService {
     this.fail("INVALID_RESULT", "验收结果仅为 accepted、concession 或 rejected");
   }
 
-  private paymentTerms(raw: string): Phase1PaymentTerms {
-    const value = raw as PaymentTermsInput;
-    if (value === "prepay") {
-      this.fail("PREPAY_NOT_IN_SCOPE", "阶段 1 不做先款后货。D6 仅 after_delivery 或 monthly", 422);
-    }
-    if (value === "after_delivery" || value === "monthly") return value;
+  private paymentTerms(raw: string): PaymentTerms {
+    if (raw === "after_delivery" || raw === "monthly" || raw === "prepay") return raw;
     this.fail("INVALID_TERMS", "付款条件无效");
   }
 
@@ -1140,7 +1940,7 @@ export class ProcurementService {
     entity: AuditLog["entity"],
     entityId: string,
     status: string,
-    code: "S1" | "S2" | "S3",
+    code: "S1" | "S2" | "S3" | "S5",
     message: string,
   ): never {
     this.audit({

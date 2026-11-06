@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { emptyThresholds, THRESHOLD_KEYS } from "../src/domain/thresholds.js";
-import { loadThresholds } from "../src/config.js";
+import { loadPrepayPolicy, loadThresholds } from "../src/config.js";
 import { ErpProInboundStub } from "../src/erp/inbound.js";
 import { boot, call, createSubmitted, login } from "./helpers.js";
 
@@ -62,19 +62,27 @@ test("配置加载把空值和占位符当成未配置", () => {
   assert.equal(named.THR_CNY_CEO, null);
 });
 
-test("阶段 1 拒绝预付，接受月结", async () => {
+test("D6=prepay 进入待预付，月结仍待收货", async () => {
   const { app } = await boot();
   try {
     const applicant = await login(app, "uc-applicant");
     const dept = await login(app, "uc-dept");
     const admin = await login(app, "uc-admin");
-    const pr = await createSubmitted(app, applicant, { qty: 1, estUnitPrice: "100.00", purpose: "月结文具" });
-    assert.equal((await call(app, dept, "POST", `/api/pr/${pr.id}/dept-approve`)).status, 200);
-    assert.equal((await call(app, admin, "POST", `/api/pr/${pr.id}/rfq-waive`, { reasonCode: "BELOW_RFQ" })).status, 200);
-    const prepay = await call(app, admin, "POST", `/api/pr/${pr.id}/issue-po`, { paymentTerms: "prepay" });
-    assert.equal(prepay.status, 422);
-    assert.equal(prepay.body.error, "PREPAY_NOT_IN_SCOPE");
-    const monthly = await call(app, admin, "POST", `/api/pr/${pr.id}/issue-po`, {
+    const prepayPr = await createSubmitted(app, applicant, { qty: 1, estUnitPrice: "100.00", purpose: "先款后货" });
+    assert.equal((await call(app, dept, "POST", `/api/pr/${prepayPr.id}/dept-approve`)).status, 200);
+    assert.equal((await call(app, admin, "POST", `/api/pr/${prepayPr.id}/rfq-waive`, { reasonCode: "BELOW_RFQ" })).status, 200);
+    const prepay = await call(app, admin, "POST", `/api/pr/${prepayPr.id}/issue-po`, {
+      paymentTerms: "prepay",
+      vendorName: "预付商",
+    });
+    assert.equal(prepay.status, 200, JSON.stringify(prepay.body));
+    assert.equal(prepay.body.paymentTerms, "prepay");
+    assert.equal(prepay.body.status, "awaiting_prepay");
+
+    const monthlyPr = await createSubmitted(app, applicant, { qty: 1, estUnitPrice: "100.00", purpose: "月结文具" });
+    assert.equal((await call(app, dept, "POST", `/api/pr/${monthlyPr.id}/dept-approve`)).status, 200);
+    assert.equal((await call(app, admin, "POST", `/api/pr/${monthlyPr.id}/rfq-waive`, { reasonCode: "BELOW_RFQ" })).status, 200);
+    const monthly = await call(app, admin, "POST", `/api/pr/${monthlyPr.id}/issue-po`, {
       paymentTerms: "monthly",
       paymentTermsDays: 30,
       vendorName: "文具商",
@@ -86,6 +94,16 @@ test("阶段 1 拒绝预付，接受月结", async () => {
   } finally {
     await app.close();
   }
+});
+
+test("预付比例占位不会变成默认数字", () => {
+  const policy = loadPrepayPolicy({});
+  assert.equal(policy.ratioMax, null);
+  assert.equal(policy.allowFullPrepay, false);
+  assert.equal(policy.inheritPrMatrix, false);
+  assert.equal(loadPrepayPolicy({ PREPAY_RATIO_MAX: "PLACEHOLDER" }).ratioMax, null);
+  assert.equal(loadPrepayPolicy({ ALLOW_FULL_PREPAY: "true" }).allowFullPrepay, true);
+  assert.throws(() => loadPrepayPolicy({ PREPAY_RATIO_MAX: "1.5" }));
 });
 
 test("固资品类强制建卡，费用化接口拒绝", async () => {

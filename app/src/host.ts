@@ -1,4 +1,4 @@
-import type { ThresholdConfig } from "./domain/thresholds.js";
+import type { PrepayPolicy, ThresholdConfig } from "./domain/thresholds.js";
 import type { ErpProInboundPort } from "./erp/inbound.js";
 import type { OidcClient } from "./oidc/client.js";
 import type { ProcurementService } from "./procurement/service.js";
@@ -10,6 +10,8 @@ import type { MemoryStore } from "./store/memory.js";
  */
 export interface ModuleOptions {
   thresholds: ThresholdConfig;
+  /** 缺省为全部未配置，且不允许全额预付。 */
+  prepayPolicy?: PrepayPolicy;
   oidc: OidcClient;
   allowDevLogin: boolean;
   seedDemoUsers: boolean;

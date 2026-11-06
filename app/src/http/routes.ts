@@ -75,7 +75,7 @@ export async function registerRoutes(
     return typeof value === "string" ? value : "";
   }
 
-  app.get("/health", async () => ({ ok: true, module: "admin-procurement", phase: 1 }));
+  app.get("/health", async () => ({ ok: true, module: "admin-procurement", phase: 2 }));
 
   app.get("/", async (_request, reply) => {
     return reply.type("text/html; charset=utf-8").send(page);
@@ -307,6 +307,124 @@ export async function registerRoutes(
   app.post("/api/matches", async (request) => {
     const session = requireSession(request);
     return handle.service.matchThreeWay(session.userId, text(body(request).poId));
+  });
+
+  app.post("/api/prepay", async (request) => {
+    const session = requireSession(request);
+    const input = body(request);
+    const proforma = input.proforma;
+    const proformaBody = proforma && typeof proforma === "object" && !Array.isArray(proforma)
+      ? proforma as Record<string, unknown>
+      : null;
+    return handle.service.createPrepay(session.userId, {
+      poId: text(input.poId),
+      amount: text(input.amount),
+      contractNo: text(input.contractNo),
+      proforma: proformaBody
+        ? {
+            invoiceNo: text(proformaBody.invoiceNo),
+            amount: text(proformaBody.amount),
+            tax: text(proformaBody.tax) || "0.00",
+          }
+        : null,
+    });
+  });
+
+  app.get("/api/prepay/:id", async (request) => {
+    requireSession(request);
+    return handle.service.getPrepay((request.params as { id: string }).id);
+  });
+
+  app.post("/api/prepay/:id/submit", async (request) => {
+    const session = requireSession(request);
+    return handle.service.submitPrepay(session.userId, (request.params as { id: string }).id);
+  });
+
+  app.post("/api/prepay/:id/dept-approve", async (request) => {
+    const session = requireSession(request);
+    return handle.service.approvePrepayDept(
+      session.userId,
+      (request.params as { id: string }).id,
+      text(body(request).comment),
+    );
+  });
+
+  app.post("/api/prepay/:id/dept-reject", async (request) => {
+    const session = requireSession(request);
+    return handle.service.rejectPrepayDept(
+      session.userId,
+      (request.params as { id: string }).id,
+      text(body(request).comment),
+    );
+  });
+
+  app.post("/api/prepay/:id/finance-cosign", async (request) => {
+    const session = requireSession(request);
+    return handle.service.approvePrepayFinance(
+      session.userId,
+      (request.params as { id: string }).id,
+      text(body(request).comment),
+    );
+  });
+
+  app.post("/api/prepay/:id/ceo-approve", async (request) => {
+    const session = requireSession(request);
+    return handle.service.approvePrepayCeo(
+      session.userId,
+      (request.params as { id: string }).id,
+      text(body(request).comment),
+    );
+  });
+
+  app.post("/api/prepay/:id/payment-approve", async (request) => {
+    const session = requireSession(request);
+    return handle.service.approvePrepayPayment(session.userId, (request.params as { id: string }).id);
+  });
+
+  app.post("/api/prepay/:id/pay", async (request) => {
+    const session = requireSession(request);
+    return handle.service.payPrepay(
+      session.userId,
+      (request.params as { id: string }).id,
+      text(body(request).bankRef),
+    );
+  });
+
+  app.post("/api/prepay/:id/accrue", async (request) => {
+    const session = requireSession(request);
+    return handle.service.accruePrepay(
+      session.userId,
+      (request.params as { id: string }).id,
+      text(body(request).voucherRef),
+    );
+  });
+
+  app.post("/api/prepay/:id/settle", async (request) => {
+    const session = requireSession(request);
+    return handle.service.settlePrepay(session.userId, (request.params as { id: string }).id);
+  });
+
+  app.post("/api/prepay/:id/refund", async (request) => {
+    const session = requireSession(request);
+    const input = body(request);
+    return handle.service.requestPrepayRefund(session.userId, (request.params as { id: string }).id, {
+      mode: text(input.mode),
+      reasonCode: text(input.reasonCode),
+    });
+  });
+
+  app.post("/api/prepay/:id/refund/approve", async (request) => {
+    const session = requireSession(request);
+    return handle.service.approvePrepayRefund(session.userId, (request.params as { id: string }).id);
+  });
+
+  app.post("/api/prepay/:id/refund/execute", async (request) => {
+    const session = requireSession(request);
+    return handle.service.executePrepayRefund(
+      session.userId,
+      (request.params as { id: string }).id,
+      text(body(request).bankRef),
+    );
   });
 
   app.post("/api/payments", async (request) => {

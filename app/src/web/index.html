@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>行政采购 · 阶段 1</title>
+  <title>行政采购 · 阶段 2</title>
   <style>
     :root { color-scheme: light; --ink: #1c2430; --muted: #5c6b7a; --line: #d5dde5; --paper: #f4f7f8; --card: #fff; --accent: #0f4c5c; }
     * { box-sizing: border-box; }
@@ -35,7 +35,7 @@
 <body>
   <header>
     <h1>行政采购（非生产）</h1>
-    <p>阶段 1 骨架：路径①货到付款 / 月结。身份走 KEMI OIDC。角色、SoD 与阈值都在本模块。不做金蝶回写。</p>
+    <p>路径①货到付款 / 月结 / 预付。身份走 KEMI OIDC。角色、SoD 与阈值都在本模块。不做金蝶回写。</p>
   </header>
   <main class="grid">
     <section>
@@ -186,7 +186,7 @@
           const terms = document.createElement("select");
           terms.dataset.field = "terms";
           terms.dataset.id = pr.id;
-          terms.innerHTML = "<option value='after_delivery'>货到付款</option><option value='monthly'>月结</option>";
+          terms.innerHTML = "<option value='after_delivery'>货到付款</option><option value='monthly'>月结</option><option value='prepay'>先款后货</option>";
           const vendor = document.createElement("input");
           vendor.placeholder = "免比价时的供应商";
           vendor.value = "行政供应商";
@@ -234,14 +234,120 @@
           }
           actions.append(location, custodian, button("固定资产建卡", "asset", po.id));
         }
-        const invoiced = workspace.invoices.some((invoice) => invoice.poId === po.id);
-        if (po.status === "fully_received" && po.dispositionDone && hasRole("finance") && !invoiced) {
-          actions.append(button("登记发票", "invoice", po.id));
+        const formalInvoice = (workspace.invoices || []).find((invoice) => invoice.poId === po.id && invoice.kind !== "proforma");
+        const livePrepay = (workspace.prepays || []).find((row) => row.poId === po.id && row.status !== "rejected" && row.status !== "cancelled");
+        if (po.status === "awaiting_prepay" && hasRole("admin") && !livePrepay) {
+          const amount = document.createElement("input");
+          amount.placeholder = "预付金额";
+          amount.dataset.field = "prepay-amount";
+          amount.dataset.id = po.id;
+          const contract = document.createElement("input");
+          contract.placeholder = "合同号，可空";
+          contract.dataset.field = "prepay-contract";
+          contract.dataset.id = po.id;
+          const proforma = document.createElement("input");
+          proforma.placeholder = "形式发票号，可空";
+          proforma.dataset.field = "prepay-proforma";
+          proforma.dataset.id = po.id;
+          actions.append(amount, contract, proforma, button("提预付", "prepay-create", po.id));
         }
-        if (po.status === "fully_received" && invoiced && hasRole("finance")) {
+        if (po.status === "fully_received" && po.dispositionDone && hasRole("finance") && !formalInvoice) {
+          if (po.paymentTerms === "prepay") {
+            const amount = document.createElement("input");
+            amount.placeholder = "正式发票金额";
+            amount.value = po.amount;
+            amount.dataset.field = "invoice-amount";
+            amount.dataset.id = po.id;
+            actions.append(amount);
+          }
+          actions.append(button("登记正式发票", "invoice", po.id));
+        }
+        if (po.status === "fully_received" && formalInvoice && hasRole("finance")) {
           actions.append(button("三单匹配", "match", po.id));
         }
-        if (po.status === "matched" && hasRole("admin")) actions.append(button("发起付款", "pay-request", po.id));
+        if (po.status === "matched" && hasRole("admin") && po.paymentTerms !== "prepay" && !livePrepay) {
+          actions.append(button("发起付款", "pay-request", po.id));
+        }
+        if (po.status === "matched" && hasRole("admin") && livePrepay && livePrepay.status === "settled_with_balance") {
+          actions.append(button("发起尾款", "pay-request", po.id));
+        }
+        block.append(title, meta, actions);
+        wrap.append(block);
+      }
+      for (const prepay of workspace.prepays || []) {
+        const block = document.createElement("div");
+        block.className = "doc";
+        const title = document.createElement("strong");
+        title.textContent = prepay.docNo + " · 预付 " + prepay.amount + " " + prepay.currency;
+        const settle = (workspace.settles || []).find((row) => row.prepayId === prepay.id);
+        const refund = (workspace.refunds || []).find((row) => row.prepayId === prepay.id);
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = "预付 " + prepay.status
+          + " · 财务关卡 " + prepay.financeGate
+          + " · 总经理关卡 " + prepay.ceoGate
+          + (settle ? " · D-P2 " + settle.dp2Result : "")
+          + (refund ? " · 溢付 " + refund.mode + " " + refund.status : "");
+        const actions = document.createElement("div");
+        actions.className = "row";
+        if (prepay.status === "draft" && me && me.id === prepay.applicantId) actions.append(button("提交预付", "prepay-submit", prepay.id));
+        if (prepay.status === "submitted" && hasRole("dept")) {
+          actions.append(button("部门通过", "prepay-dept", prepay.id));
+          actions.append(button("驳回", "prepay-dept-reject", prepay.id, "danger"));
+        }
+        if (prepay.status === "dept_approved" && prepay.financeGate === "required" && hasRole("finance")) {
+          actions.append(button("财务加签", "prepay-fin", prepay.id));
+        }
+        if (prepay.status === "finance_cosigned" && prepay.ceoGate === "required" && hasRole("ceo")) {
+          actions.append(button("总经理批准", "prepay-ceo", prepay.id));
+        }
+        const financeDone = prepay.financeGate === "skipped" || prepay.financeGate === "approved";
+        const ceoDone = prepay.ceoGate === "skipped" || prepay.ceoGate === "approved";
+        const readyPay = financeDone && ceoDone && ["dept_approved", "finance_cosigned", "ceo_approved"].indexOf(prepay.status) >= 0;
+        if (readyPay && hasRole("finance")) actions.append(button("批准预付", "prepay-pay-approve", prepay.id));
+        if (prepay.status === "finance_payment_approved" && hasRole("cashier")) {
+          const bank = document.createElement("input");
+          bank.placeholder = "银行回单号";
+          bank.value = "PREPAY-BANK";
+          bank.dataset.field = "prepay-bank";
+          bank.dataset.id = prepay.id;
+          actions.append(bank, button("付预付款", "prepay-pay", prepay.id));
+        }
+        if (prepay.status === "paid" && hasRole("finance")) {
+          const voucher = document.createElement("input");
+          voucher.placeholder = "预付凭证号";
+          voucher.value = "PREPAY-VCH";
+          voucher.dataset.field = "prepay-voucher";
+          voucher.dataset.id = prepay.id;
+          actions.append(voucher, button("记预付账款", "prepay-accrue", prepay.id));
+        }
+        if (prepay.status === "awaiting_delivery" && hasRole("finance")) {
+          const linked = workspace.pos.find((row) => row.id === prepay.poId);
+          if (linked && linked.status === "matched") actions.append(button("核销预付", "prepay-settle", prepay.id));
+        }
+        if (prepay.status === "settling" && settle && settle.dp2Result === "over" && !refund && hasRole("admin")) {
+          actions.append(button("申请退款", "prepay-refund", prepay.id));
+        }
+        if (prepay.status === "settling" && settle && settle.dp2Result === "over" && !refund && hasRole("finance")) {
+          const reason = document.createElement("input");
+          reason.placeholder = "挂账原因码";
+          reason.value = "SUSPENSE";
+          reason.dataset.field = "suspense-reason";
+          reason.dataset.id = prepay.id;
+          actions.append(reason, button("挂账", "prepay-suspense", prepay.id));
+        }
+        if (refund && refund.status === "requested" && hasRole("finance")) actions.append(button("批准退款", "prepay-refund-approve", prepay.id));
+        if (refund && refund.status === "finance_approved" && refund.mode === "refund" && hasRole("cashier")) {
+          const bank = document.createElement("input");
+          bank.placeholder = "退款回单号";
+          bank.value = "REFUND-BANK";
+          bank.dataset.field = "refund-bank";
+          bank.dataset.id = prepay.id;
+          actions.append(bank, button("执行退款", "prepay-refund-exec", prepay.id));
+        }
+        if (refund && refund.status === "finance_approved" && refund.mode === "suspense" && hasRole("finance")) {
+          actions.append(button("确认挂账", "prepay-refund-exec", prepay.id));
+        }
         block.append(title, meta, actions);
         wrap.append(block);
       }
@@ -444,9 +550,52 @@
         }
         if (act === "invoice") {
           const po = workspace.pos.find((row) => row.id === id);
+          const typed = fieldValue("invoice-amount", id);
           await api("/api/invoices", {
             method: "POST",
-            body: JSON.stringify({ poId: id, invoiceNo: "INV-" + id, invoiceType: "special", amount: po.amount, tax: "0.00" }),
+            body: JSON.stringify({ poId: id, invoiceNo: "INV-" + id, invoiceType: "special", amount: typed || po.amount, tax: "0.00" }),
+          });
+        }
+        if (act === "prepay-create") {
+          const contractNo = fieldValue("prepay-contract", id);
+          const proformaNo = fieldValue("prepay-proforma", id);
+          const amount = fieldValue("prepay-amount", id);
+          const created = await api("/api/prepay", {
+            method: "POST",
+            body: JSON.stringify({
+              poId: id,
+              amount,
+              contractNo,
+              proforma: proformaNo ? { invoiceNo: proformaNo, amount, tax: "0.00" } : null,
+            }),
+          });
+          await api("/api/prepay/" + created.id + "/submit", { method: "POST", body: "{}" });
+        }
+        if (act === "prepay-submit") await api("/api/prepay/" + id + "/submit", { method: "POST", body: "{}" });
+        if (act === "prepay-dept") await api("/api/prepay/" + id + "/dept-approve", { method: "POST", body: "{}" });
+        if (act === "prepay-dept-reject") await api("/api/prepay/" + id + "/dept-reject", { method: "POST", body: "{}" });
+        if (act === "prepay-fin") await api("/api/prepay/" + id + "/finance-cosign", { method: "POST", body: "{}" });
+        if (act === "prepay-ceo") await api("/api/prepay/" + id + "/ceo-approve", { method: "POST", body: "{}" });
+        if (act === "prepay-pay-approve") await api("/api/prepay/" + id + "/payment-approve", { method: "POST", body: "{}" });
+        if (act === "prepay-pay") {
+          await api("/api/prepay/" + id + "/pay", { method: "POST", body: JSON.stringify({ bankRef: fieldValue("prepay-bank", id) }) });
+        }
+        if (act === "prepay-accrue") {
+          await api("/api/prepay/" + id + "/accrue", { method: "POST", body: JSON.stringify({ voucherRef: fieldValue("prepay-voucher", id) }) });
+        }
+        if (act === "prepay-settle") await api("/api/prepay/" + id + "/settle", { method: "POST", body: "{}" });
+        if (act === "prepay-refund") await api("/api/prepay/" + id + "/refund", { method: "POST", body: JSON.stringify({ mode: "refund" }) });
+        if (act === "prepay-suspense") {
+          await api("/api/prepay/" + id + "/refund", {
+            method: "POST",
+            body: JSON.stringify({ mode: "suspense", reasonCode: fieldValue("suspense-reason", id) }),
+          });
+        }
+        if (act === "prepay-refund-approve") await api("/api/prepay/" + id + "/refund/approve", { method: "POST", body: "{}" });
+        if (act === "prepay-refund-exec") {
+          await api("/api/prepay/" + id + "/refund/execute", {
+            method: "POST",
+            body: JSON.stringify({ bankRef: fieldValue("refund-bank", id) }),
           });
         }
         if (act === "match") await api("/api/matches", { method: "POST", body: JSON.stringify({ poId: id }) });
