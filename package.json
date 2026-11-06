@@ -1,0 +1,11 @@
+{
+  "name": "kemi-admin-procurement",
+  "private": true,
+  "description": "非生产行政采购 Spec 与阶段 1 可嵌入模块",
+  "scripts": {
+    "test": "npm test --prefix app",
+    "typecheck": "npm run typecheck --prefix app",
+    "start": "npm start --prefix app",
+    "dev": "npm run dev --prefix app"
+  }
+}

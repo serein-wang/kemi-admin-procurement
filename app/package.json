@@ -1,0 +1,28 @@
+{
+  "name": "@kemi/admin-procurement",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "行政采购阶段 1 可嵌入模块（路径①货到付款）。不依赖 KEMI One / Canvas 宿主 API。",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "test": "tsc --noEmit && tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "fastify": "^5.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

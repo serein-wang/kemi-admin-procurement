@@ -2,8 +2,9 @@
 
 > 调研日期：2026-11-06 Asia/Shanghai  
 > 目的：选型 **A（嵌入 KEMI One / Canvas）+ D（erp-pro 入库/料号协同）** 后，摸清代码仓、工作流、权限，供阶段 1 接入。  
-> 约束：只读检索；**未改**他人工程；**未写**行政采购业务代码；凭据不进本包。  
-> 身份权威：`sources/kemi-oidc/`（自 [KEMI 账号授权登录](https://kemi.newlinksz.com/kd/docs/kemi-oidc) / `kd-api` 拉取）。
+> 约束：只读检索；**未改**他人工程；凭据不进本包。  
+> 身份权威：`sources/kemi-oidc/`（自 [KEMI 账号授权登录](https://kemi.newlinksz.com/kd/docs/kemi-oidc) / `kd-api` 拉取）。  
+> **状态更新（2026-11-06 开工后）：** 宿主仓仍未找到。阶段 1 不阻塞于 Canvas：业务代码在本仓库 `app/`，作为可嵌入模块实现，不臆造宿主 API。下文检索结论保持为调研当时的记录。
 
 ---
 
@@ -176,14 +177,14 @@ KEMI OIDC  ──►  你是谁（sub）
 
 ### 6.2 阶段 1 接入清单（可勾选）
 
-- [ ] 向持仓人索取 **KEMI One / Canvas 代码仓地址与权限**（本轮本地/Origin/公开 GitHub 均未命中）
-- [ ] 确认 Canvas 是否已有**审批流 / 待办 / 加签**可复用；输出「复用 vs 自研状态机」一页结论
-- [ ] 在 https://kemi.newlinksz.com/kd 为行政采购登记 **Web 应用**（`redirect_uri`、环境变量名约定；secret 进 Vault，**不进 Spec**）
-- [ ] 实现 OIDC 网页回调 + 本地 `uc_user_id` upsert + 业务 session
-- [ ] 定义应用内角色枚举与 S1/S2/S3 服务端校验（对齐 docs/05）
-- [ ] MVP 单据 API/页：请购→…→付款（无预付）；分类校验挡生产物料
-- [ ] （可选后置）行政入库 → erp-pro 协同探针与会话隔离测试
-- [ ] 阈值配置表 backlog（财务填数）——与代码解耦
+- [ ] 向持仓人索取 **KEMI One / Canvas 代码仓地址与权限**（本轮本地/Origin/公开 GitHub 均未命中；阶段 1 不因此停工）
+- [ ] 确认 Canvas 是否已有**审批流 / 待办 / 加签**可复用。在确认前，本仓使用模块内状态机，不调用宿主引擎
+- [ ] 在 https://kemi.newlinksz.com/kd 为行政采购登记 **Web 应用**（`redirect_uri`、环境变量名约定；secret 进环境变量，**不进仓库**）
+- [x] 本仓实现 OIDC 网页回调 + 本地 `uc_user_id` upsert + 业务 session（`app/`）
+- [x] 应用内角色表与 S1/S2/S3 服务端校验（对齐 docs/05）
+- [x] MVP 单据 API/页：请购→…→付款（无预付）；分类校验挡生产物料
+- [x] 行政入库 → erp-pro stub；断言拒绝生产会话字段与 cookie
+- [x] 阈值配置表 backlog（财务填数）——与代码解耦，默认 null
 
 ### 6.3 风险
 
@@ -193,7 +194,7 @@ KEMI OIDC  ──►  你是谁（sub）
 | 误以为 OIDC 已含审批权限 | SoD 空洞 | 文档已写清；代码评审卡「角色表」 |
 | 与 erp-pro / 星空会话混用 | 错审生产料号 | 硬隔离 cookie / 技能边界（erp-pro-audit） |
 | 把 Cursor Canvas / LMS Canvas 当产品 | 文档与对接跑偏 | 本调研已排除 |
-| 过早改仓 | 违反阶段 0 门禁 | **须开工授权**后再改 One/Canvas |
+| 过早改宿主仓 | 宿主仓仍未取得 | 开工授权已给；只在本仓加可嵌入模块，不改宿主 |
 
 ---
 
@@ -214,3 +215,4 @@ KEMI OIDC  ──►  你是谁（sub）
 | 日期 | 说明 |
 |------|------|
 | 2026-11-06 | 初稿：本地/旁系检索 + OIDC sources 并入；选型 A 身份策略定稿建议 |
+| 2026-11-06 | 开工后补记：阶段 1 脚手架落在本仓 `app/`，不把调研中的「未知宿主能力」写成已接入 |

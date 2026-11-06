@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>行政采购 · 阶段 1</title>
+  <style>
+    :root { color-scheme: light; --ink: #1c2430; --muted: #5c6b7a; --line: #d5dde5; --paper: #f4f7f8; --card: #fff; --accent: #0f4c5c; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 15px/1.5 "Segoe UI", "PingFang SC", "Noto Sans SC", sans-serif; color: var(--ink); background: var(--paper); }
+    header, main { width: min(1100px, calc(100% - 32px)); margin: 0 auto; }
+    header { padding: 24px 0 8px; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    h2 { font-size: 16px; margin: 0 0 12px; }
+    p { margin: 0; color: var(--muted); }
+    .grid { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 16px 0 40px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 12px; }
+    label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
+    input, select, button { font: inherit; }
+    input, select { width: 100%; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+    button, .linkish { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 7px 10px; cursor: pointer; text-decoration: none; display: inline-block; }
+    button.ghost { background: #e8eef1; color: var(--ink); }
+    button.danger { background: #8c3a3a; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .banner { padding: 8px 10px; border-radius: 6px; background: #fff6e8; color: #6a4b16; margin-top: 8px; }
+    .error { background: #fdecec; color: #7a2424; }
+    .ok { background: #e8f6ef; color: #1d5c3a; }
+    .doc { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px; }
+    .meta { color: var(--muted); font-size: 13px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; border-bottom: 1px solid var(--line); padding: 6px 4px; vertical-align: top; }
+    @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>行政采购（非生产）</h1>
+    <p>阶段 1 骨架：路径①货到付款 / 月结。身份走 KEMI OIDC。角色、SoD 与阈值都在本模块。不做金蝶回写。</p>
+  </header>
+  <main class="grid">
+    <section>
+      <div class="card">
+        <h2>登录</h2>
+        <div id="session" class="meta">正在读取会话…</div>
+        <div class="row">
+          <a class="linkish" id="kemi-login" href="__PREFIX__/auth/login">用 KEMI 登录</a>
+          <button class="ghost" id="logout" type="button" hidden>退出</button>
+        </div>
+        <div id="dev-box"></div>
+      </div>
+      <div class="card">
+        <h2>①-1 新建请购</h2>
+        <form id="pr-form">
+          <label>事由</label>
+          <input name="purpose" value="会议室显示器" required />
+          <label>部门</label>
+          <input name="deptId" value="D-ADMIN" required />
+          <label>公司</label>
+          <select name="companyCode"><option>SZ</option><option>HK</option></select>
+          <label>币种</label>
+          <select name="currency"><option>CNY</option><option>HKD</option></select>
+          <label>品名</label>
+          <input name="itemName" value="显示器" required />
+          <label>数量</label>
+          <input name="qty" type="number" min="1" step="1" value="2" required />
+          <label>预估单价</label>
+          <input name="estUnitPrice" value="1500.00" required />
+          <label>品类</label>
+          <select name="category">
+            <option value="consumable">耗材 consumable</option>
+            <option value="fixed_asset">固资 fixed_asset</option>
+            <option value="service">服务 service</option>
+            <option value="low_value">低值 low_value</option>
+          </select>
+          <div class="row"><button type="submit">创建草稿</button></div>
+        </form>
+      </div>
+    </section>
+    <section>
+      <div id="notice"></div>
+      <div class="card">
+        <h2>单据</h2>
+        <div id="docs" class="meta">登录后显示请购、采购单与付款。</div>
+      </div>
+      <div class="card">
+        <h2>审计</h2>
+        <div id="audits" class="meta">暂无</div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const PREFIX = "__PREFIX__";
+    const sessionEl = document.querySelector("#session");
+    const docsEl = document.querySelector("#docs");
+    const auditsEl = document.querySelector("#audits");
+    const noticeEl = document.querySelector("#notice");
+    const logoutBtn = document.querySelector("#logout");
+    let me = null;
+    let workspace = null;
+
+    function notice(kind, text) {
+      noticeEl.innerHTML = "";
+      if (!text) return;
+      const div = document.createElement("div");
+      div.className = "banner " + kind;
+      div.textContent = text;
+      noticeEl.appendChild(div);
+    }
+
+    async function api(path, options) {
+      const response = await fetch(PREFIX + path, {
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        ...options,
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const code = data.sodViolationCode ? data.sodViolationCode + " " : "";
+        throw new Error(code + (data.message || data.error || response.status));
+      }
+      return data;
+    }
+
+    function hasRole(role) {
+      return Boolean(me && me.roles && me.roles.includes(role));
+    }
+
+    function userName(id) {
+      const found = (workspace && workspace.users || []).find((user) => user.id === id);
+      return found ? found.displayName : id;
+    }
+
+    function button(label, act, id, className) {
+      const el = document.createElement("button");
+      el.type = "button";
+      el.textContent = label;
+      el.dataset.act = act;
+      el.dataset.id = id;
+      if (className) el.className = className;
+      return el;
+    }
+
+    function renderDocs() {
+      docsEl.innerHTML = "";
+      if (!workspace) {
+        docsEl.textContent = "登录后显示单据。";
+        return;
+      }
+      const wrap = document.createElement("div");
+      for (const pr of workspace.prs) {
+        const block = document.createElement("div");
+        block.className = "doc";
+        const title = document.createElement("strong");
+        title.textContent = pr.docNo + " · " + pr.purpose + " · " + pr.amount + " " + pr.currency;
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = "请购 " + pr.status
+          + " · 财务关卡 " + pr.financeGate
+          + " · 总经理关卡 " + pr.ceoGate
+          + " · 比价 " + (pr.rfqRequired == null ? "未定" : pr.rfqRequired ? "必须" : "可免");
+        const actions = document.createElement("div");
+        actions.className = "row";
+        if (pr.status === "draft" && me && me.id === pr.applicantId) actions.append(button("提交", "submit", pr.id));
+        if (pr.status === "submitted" && hasRole("dept")) {
+          actions.append(button("部门通过", "dept-approve", pr.id));
+          actions.append(button("驳回", "dept-reject", pr.id, "danger"));
+        }
+        if (pr.status === "dept_approved" && pr.financeGate === "required" && hasRole("finance")) {
+          actions.append(button("财务加签", "finance-approve", pr.id));
+        }
+        if (pr.status === "finance_approved" && pr.ceoGate === "required" && hasRole("ceo")) {
+          actions.append(button("总经理批准", "ceo-approve", pr.id));
+        }
+        if (pr.status === "sourcing" && hasRole("admin") && pr.rfqRequired) {
+          actions.append(button("登记三家比价（示例价）", "rfq", pr.id));
+        }
+        if (pr.status === "sourcing" && hasRole("admin") && pr.rfqRequired === false) {
+          const reason = document.createElement("input");
+          reason.placeholder = "免比价原因码";
+          reason.value = "BELOW_THRESHOLD";
+          reason.dataset.field = "reason";
+          reason.dataset.id = pr.id;
+          actions.append(reason, button("免比价", "waive", pr.id));
+        }
+        if (pr.status === "ready_for_po" && hasRole("admin")) {
+          const terms = document.createElement("select");
+          terms.dataset.field = "terms";
+          terms.dataset.id = pr.id;
+          terms.innerHTML = "<option value='after_delivery'>货到付款</option><option value='monthly'>月结</option>";
+          const vendor = document.createElement("input");
+          vendor.placeholder = "免比价时的供应商";
+          vendor.value = "行政供应商";
+          vendor.dataset.field = "vendor";
+          vendor.dataset.id = pr.id;
+          actions.append(terms, vendor, button("下采购单", "issue", pr.id));
+        }
+        block.append(title, meta, actions);
+        wrap.append(block);
+      }
+      for (const po of workspace.pos) {
+        const block = document.createElement("div");
+        block.className = "doc";
+        const title = document.createElement("strong");
+        title.textContent = po.docNo + " · " + po.paymentTerms + " · " + po.amount + " " + po.currency;
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = "采购单 " + po.status
+          + " · 下单 " + userName(po.issuerId)
+          + " · 验收人应是 " + userName(po.applicantId)
+          + " · D4 " + po.disposition
+          + (po.erpInboundRefs.length ? " · 入库 " + po.erpInboundRefs.join(",") : "");
+        const actions = document.createElement("div");
+        actions.className = "row";
+        if ((po.status === "awaiting_receipt" || po.status === "partially_received") && me && me.id === po.applicantId) {
+          actions.append(button("验收合格", "receive", po.id));
+        }
+        if (po.status === "fully_received" && !po.dispositionDone && po.disposition === "expense" && hasRole("admin")) {
+          actions.append(button("费用化 / 行政入库", "expense", po.id));
+        }
+        if (po.status === "fully_received" && !po.dispositionDone && po.disposition === "asset" && hasRole("admin")) {
+          const location = document.createElement("input");
+          location.placeholder = "存放位置";
+          location.value = "前台";
+          location.dataset.field = "location";
+          location.dataset.id = po.id;
+          const custodian = document.createElement("select");
+          custodian.dataset.field = "custodian";
+          custodian.dataset.id = po.id;
+          for (const user of workspace.users) {
+            const option = document.createElement("option");
+            option.value = user.id;
+            option.textContent = user.displayName;
+            custodian.append(option);
+          }
+          actions.append(location, custodian, button("固定资产建卡", "asset", po.id));
+        }
+        const invoiced = workspace.invoices.some((invoice) => invoice.poId === po.id);
+        if (po.status === "fully_received" && po.dispositionDone && hasRole("finance") && !invoiced) {
+          actions.append(button("登记发票", "invoice", po.id));
+        }
+        if (po.status === "fully_received" && invoiced && hasRole("finance")) {
+          actions.append(button("三单匹配", "match", po.id));
+        }
+        if (po.status === "matched" && hasRole("admin")) actions.append(button("发起付款", "pay-request", po.id));
+        block.append(title, meta, actions);
+        wrap.append(block);
+      }
+      for (const pay of workspace.payments) {
+        const block = document.createElement("div");
+        block.className = "doc";
+        const title = document.createElement("strong");
+        title.textContent = pay.docNo + " · 付款 " + pay.status + " · " + pay.amount;
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = "记账人 " + userName(pay.voucherCreatorId)
+          + (pay.payerId ? " · 付款人 " + userName(pay.payerId) : "");
+        const actions = document.createElement("div");
+        actions.className = "row";
+        if (pay.status === "submitted" && hasRole("finance")) actions.append(button("批准付款", "pay-approve", pay.id));
+        if (pay.status === "finance_approved" && hasRole("cashier")) {
+          const bank = document.createElement("input");
+          bank.placeholder = "银行回单号";
+          bank.value = "BANK-001";
+          bank.dataset.field = "bank";
+          bank.dataset.id = pay.id;
+          actions.append(bank, button("出纳付款", "pay", pay.id));
+        }
+        block.append(title, meta, actions);
+        wrap.append(block);
+      }
+      if (!wrap.childElementCount) wrap.textContent = "还没有单据。";
+      docsEl.append(wrap);
+      renderAudits();
+    }
+
+    function renderAudits() {
+      auditsEl.innerHTML = "";
+      const rows = (workspace && workspace.audits) || [];
+      if (!rows.length) {
+        auditsEl.textContent = "暂无";
+        return;
+      }
+      const table = document.createElement("table");
+      const head = document.createElement("tr");
+      for (const label of ["时间", "对象", "迁移", "说明"]) {
+        const th = document.createElement("th");
+        th.textContent = label;
+        head.append(th);
+      }
+      table.append(head);
+      for (const row of rows.slice().reverse()) {
+        const tr = document.createElement("tr");
+        const cells = [
+          row.at.replace("T", " ").slice(0, 19),
+          row.entity + " " + row.entityId,
+          (row.fromStatus || "—") + " → " + (row.toStatus || "—") + (row.skipped ? " · 跳过 " + (row.skippedReason || "") : "") + (row.sodViolationCode ? " · " + row.sodViolationCode : ""),
+          row.comment,
+        ];
+        for (const text of cells) {
+          const td = document.createElement("td");
+          td.textContent = text;
+          tr.append(td);
+        }
+        table.append(tr);
+      }
+      auditsEl.append(table);
+    }
+
+    function fieldValue(field, id) {
+      const el = document.querySelector("[data-field='" + field + "'][data-id='" + id + "']");
+      return el ? el.value : "";
+    }
+
+    async function refresh() {
+      const meta = await api("/api/meta");
+      const devBox = document.querySelector("#dev-box");
+      devBox.innerHTML = "";
+      if (!meta.thresholdReady.CNY || !meta.thresholdReady.HKD) {
+        const warn = document.createElement("div");
+        warn.className = "banner";
+        warn.textContent = "金额阈值仍是占位（"
+          + (meta.thresholdReady.CNY ? "" : "CNY ")
+          + (meta.thresholdReady.HKD ? "" : "HKD")
+          + "）。未注入前，审批会拒绝而不会套用默认金额。";
+        devBox.append(warn);
+      }
+      if (meta.devLogin) {
+        const title = document.createElement("p");
+        title.textContent = "本地走查账号（ALLOW_DEV_LOGIN）。不是 KEMI 身份源。";
+        const row = document.createElement("div");
+        row.className = "row";
+        for (const user of meta.demoUsers) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "ghost";
+          btn.textContent = user.displayName;
+          btn.addEventListener("click", async () => {
+            try {
+              await api("/auth/dev-login", { method: "POST", body: JSON.stringify({ ucUserId: user.ucUserId }) });
+              notice("ok", "已切换到 " + user.displayName);
+              await refresh();
+            } catch (error) {
+              notice("error", error.message);
+            }
+          });
+          row.append(btn);
+        }
+        devBox.append(title, row);
+      }
+      try {
+        const meRes = await api("/auth/me");
+        me = meRes.user;
+        sessionEl.textContent = me.displayName + " · " + me.ucUserId + " · " + (me.roles.join(" / ") || "无角色") + " · " + me.status;
+        logoutBtn.hidden = false;
+        workspace = await api("/api/workspace");
+      } catch (error) {
+        me = null;
+        workspace = null;
+        sessionEl.textContent = "未登录";
+        logoutBtn.hidden = true;
+      }
+      renderDocs();
+    }
+
+    document.querySelector("#logout").addEventListener("click", async () => {
+      await api("/auth/logout", { method: "POST", body: "{}" });
+      notice("", "");
+      await refresh();
+    });
+
+    document.querySelector("#pr-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = new FormData(event.target);
+      try {
+        const created = await api("/api/pr", {
+          method: "POST",
+          body: JSON.stringify({
+            companyCode: form.get("companyCode"),
+            currency: form.get("currency"),
+            deptId: form.get("deptId"),
+            purpose: form.get("purpose"),
+            lines: [{
+              itemName: form.get("itemName"),
+              qty: Number(form.get("qty")),
+              estUnitPrice: String(form.get("estUnitPrice")),
+              category: form.get("category"),
+            }],
+          }),
+        });
+        notice("ok", "已创建 " + created.docNo);
+        await refresh();
+      } catch (error) {
+        notice("error", error.message);
+      }
+    });
+
+    document.body.addEventListener("click", async (event) => {
+      const target = event.target.closest("[data-act]");
+      if (!target) return;
+      const id = target.dataset.id;
+      const act = target.dataset.act;
+      try {
+        if (act === "submit") await api("/api/pr/" + id + "/submit", { method: "POST", body: "{}" });
+        if (act === "dept-approve") await api("/api/pr/" + id + "/dept-approve", { method: "POST", body: "{}" });
+        if (act === "dept-reject") await api("/api/pr/" + id + "/dept-reject", { method: "POST", body: "{}" });
+        if (act === "finance-approve") await api("/api/pr/" + id + "/finance-approve", { method: "POST", body: "{}" });
+        if (act === "ceo-approve") await api("/api/pr/" + id + "/ceo-approve", { method: "POST", body: "{}" });
+        if (act === "rfq") {
+          await api("/api/pr/" + id + "/rfq", {
+            method: "POST",
+            body: JSON.stringify({
+              quotes: [
+                { vendorName: "供应商甲", amount: "2900.00", leadTimeDays: 7, selected: false },
+                { vendorName: "供应商乙", amount: "3000.00", leadTimeDays: 5, selected: true },
+                { vendorName: "供应商丙", amount: "3100.00", leadTimeDays: 9, selected: false },
+              ],
+            }),
+          });
+        }
+        if (act === "waive") {
+          await api("/api/pr/" + id + "/rfq-waive", {
+            method: "POST",
+            body: JSON.stringify({ reasonCode: fieldValue("reason", id) }),
+          });
+        }
+        if (act === "issue") {
+          const terms = fieldValue("terms", id);
+          await api("/api/pr/" + id + "/issue-po", {
+            method: "POST",
+            body: JSON.stringify({
+              paymentTerms: terms,
+              paymentTermsDays: terms === "monthly" ? 30 : null,
+              vendorName: fieldValue("vendor", id),
+            }),
+          });
+        }
+        if (act === "receive") await api("/api/po/" + id + "/receive", { method: "POST", body: JSON.stringify({ result: "accepted" }) });
+        if (act === "expense") await api("/api/po/" + id + "/expense", { method: "POST", body: "{}" });
+        if (act === "asset") {
+          await api("/api/po/" + id + "/asset-card", {
+            method: "POST",
+            body: JSON.stringify({ location: fieldValue("location", id), custodianId: fieldValue("custodian", id), name: "固定资产" }),
+          });
+        }
+        if (act === "invoice") {
+          const po = workspace.pos.find((row) => row.id === id);
+          await api("/api/invoices", {
+            method: "POST",
+            body: JSON.stringify({ poId: id, invoiceNo: "INV-" + id, invoiceType: "special", amount: po.amount, tax: "0.00" }),
+          });
+        }
+        if (act === "match") await api("/api/matches", { method: "POST", body: JSON.stringify({ poId: id }) });
+        if (act === "pay-request") await api("/api/payments", { method: "POST", body: JSON.stringify({ poId: id }) });
+        if (act === "pay-approve") await api("/api/payments/" + id + "/finance-approve", { method: "POST", body: "{}" });
+        if (act === "pay") {
+          await api("/api/payments/" + id + "/pay", {
+            method: "POST",
+            body: JSON.stringify({ bankRef: fieldValue("bank", id) }),
+          });
+        }
+        notice("ok", "已完成");
+        await refresh();
+      } catch (error) {
+        notice("error", error.message);
+        await refresh();
+      }
+    });
+
+    refresh().catch((error) => notice("error", error.message));
+  </script>
+</body>
+</html>
