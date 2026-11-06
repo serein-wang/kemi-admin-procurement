@@ -253,8 +253,62 @@
       white-space: nowrap;
     }
     .thumbs button { height: 24px; margin-top: 4px; padding: 0 6px; font-size: 12px; }
+    .path-choices {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-top: 4px;
+    }
+    .path-choice {
+      height: auto;
+      min-height: 148px;
+      padding: 22px 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      justify-content: center;
+      gap: 8px;
+      text-align: left;
+      white-space: normal;
+      background: #fff;
+      color: var(--ink);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-card);
+      box-shadow: none;
+    }
+    .path-choice:hover {
+      border-color: var(--blue);
+      background: var(--blue-soft);
+      color: var(--ink);
+    }
+    .path-kicker {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--blue);
+      letter-spacing: 0.02em;
+    }
+    .path-title {
+      font-size: 20px;
+      font-weight: 600;
+      line-height: 1.3;
+      color: var(--ink);
+    }
+    .path-desc {
+      font-size: 13px;
+      line-height: 1.45;
+      color: var(--muted);
+    }
+    .path-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      margin-top: 14px;
+    }
+    .path-bar .meta { margin: 0; }
     @media (max-width: 800px) {
       .grid { grid-template-columns: 1fr; }
+      .path-choices { grid-template-columns: 1fr; }
       .topbar-inner { align-items: flex-start; flex-direction: column; padding: 10px 0; }
     }
   </style>
@@ -273,7 +327,7 @@
     </div>
   </header>
   <main>
-    <p class="lede">路径①货到付款 / 月结 / 预付 / 超期例外，以及路径②强制事前报销。身份走 KEMI OIDC。角色、SoD 与阈值都在本模块。不做金蝶回写。</p>
+    <p class="lede">登录后第一步选择办理路径。公司采购走请购与采购（货到付款 / 月结 / 预付 / 超期例外）。员工垫付报销走强制事前申请后再报销。身份走 KEMI OIDC。角色、SoD 与阈值都在本模块。不做金蝶回写。</p>
     <div class="card">
       <h2>登录</h2>
       <div class="row">
@@ -282,9 +336,31 @@
       </div>
       <div id="dev-box"></div>
     </div>
+    <p id="login-gate" class="lede">登录后，第一步选择办理路径。</p>
+    <section id="path-chooser" class="card" hidden>
+      <h2 id="path-chooser-title">第一步 · 选择办理路径</h2>
+      <p class="hint">请先选择一种。选定后只显示该路径的新建表单和相关单据，可以返回重选。</p>
+      <div class="path-choices" role="group" aria-label="办理路径">
+        <button type="button" id="choose-company" class="path-choice">
+          <span class="path-kicker">路径① · 请购 / 采购</span>
+          <span class="path-title">公司采购</span>
+          <span class="path-desc">新建请购，随后比价、下采购单、验收与付款。</span>
+        </button>
+        <button type="button" id="choose-reimburse" class="path-choice">
+          <span class="path-kicker">路径② · 事前申请 / 报销</span>
+          <span class="path-title">员工垫付报销</span>
+          <span class="path-desc">先做事前申请，批准后再提报销。</span>
+        </button>
+      </div>
+    </section>
+    <div id="path-workspace" hidden>
+    <div class="path-bar">
+      <button type="button" id="change-path" class="ghost">返回重选路径</button>
+      <span id="path-label" class="meta"></span>
+    </div>
     <div class="grid">
     <section>
-      <div class="card">
+      <div class="card" id="pr-card" hidden>
         <h2>①-1 新建请购</h2>
         <form id="pr-form">
           <label>事由</label>
@@ -316,7 +392,7 @@
           <div class="row"><button type="submit">创建草稿</button></div>
         </form>
       </div>
-      <div class="card">
+      <div class="card" id="pre-card" hidden>
         <h2>②-1 事前申请</h2>
         <form id="pre-form">
           <label>事由</label>
@@ -334,13 +410,14 @@
       <div id="notice"></div>
       <div class="card">
         <h2>单据</h2>
-        <div id="docs" class="meta">登录后显示请购、采购单、预付、事前与报销。</div>
+        <div id="docs" class="meta">选择路径后显示该路径的单据。</div>
       </div>
       <div class="card">
         <h2>审计</h2>
         <div id="audits" class="meta">暂无</div>
       </div>
     </section>
+    </div>
     </div>
   </main>
   <script>
@@ -352,6 +429,41 @@
     const logoutBtn = document.querySelector("#logout");
     let me = null;
     let workspace = null;
+    let selectedPath = null;
+    try {
+      const storedPath = sessionStorage.getItem("ap-path");
+      if (storedPath === "company" || storedPath === "reimburse") selectedPath = storedPath;
+    } catch (error) {
+      selectedPath = null;
+    }
+
+    function rememberPath(path) {
+      selectedPath = path;
+      try {
+        if (path) sessionStorage.setItem("ap-path", path);
+        else sessionStorage.removeItem("ap-path");
+      } catch (error) {
+        /* 走查不依赖本地存储 */
+      }
+    }
+
+    function applyPathView() {
+      const loggedIn = Boolean(me);
+      const chooser = document.querySelector("#path-chooser");
+      const gate = document.querySelector("#login-gate");
+      const workspaceEl = document.querySelector("#path-workspace");
+      const prCard = document.querySelector("#pr-card");
+      const preCard = document.querySelector("#pre-card");
+      const label = document.querySelector("#path-label");
+      gate.hidden = loggedIn;
+      chooser.hidden = !loggedIn || Boolean(selectedPath);
+      workspaceEl.hidden = !loggedIn || !selectedPath;
+      prCard.hidden = selectedPath !== "company";
+      preCard.hidden = selectedPath !== "reimburse";
+      if (selectedPath === "company") label.textContent = "当前路径：公司采购 · 请购 / 采购";
+      else if (selectedPath === "reimburse") label.textContent = "当前路径：员工垫付报销 · 事前申请 / 报销";
+      else label.textContent = "";
+    }
 
     function notice(kind, text) {
       noticeEl.innerHTML = "";
@@ -398,17 +510,17 @@
     function renderDocs() {
       docsEl.innerHTML = "";
       if (!workspace) {
-        docsEl.textContent = "登录后显示单据。";
+        docsEl.textContent = "选择路径后显示该路径的单据。";
         return;
       }
       const wrap = document.createElement("div");
-      if (hasRole("finance")) {
+      if (selectedPath === "company" && hasRole("finance")) {
         const tools = document.createElement("div");
         tools.className = "row";
         tools.append(button("运行①-E1超期清单", "overdue-scan", "all"));
         wrap.append(tools);
       }
-      for (const pr of workspace.prs) {
+      for (const pr of selectedPath === "company" ? workspace.prs : []) {
         const block = document.createElement("div");
         block.className = "doc";
         const title = document.createElement("strong");
@@ -475,7 +587,7 @@
         block.append(actions);
         wrap.append(block);
       }
-      for (const po of workspace.pos) {
+      for (const po of selectedPath === "company" ? workspace.pos : []) {
         const block = document.createElement("div");
         block.className = "doc";
         const title = document.createElement("strong");
@@ -566,7 +678,7 @@
         block.append(actions);
         wrap.append(block);
       }
-      for (const card of workspace.assets || []) {
+      for (const card of selectedPath === "company" ? (workspace.assets || []) : []) {
         const block = document.createElement("div");
         block.className = "doc";
         const title = document.createElement("strong");
@@ -601,7 +713,7 @@
         block.append(title, meta, actions);
         wrap.append(block);
       }
-      for (const prepay of workspace.prepays || []) {
+      for (const prepay of selectedPath === "company" ? (workspace.prepays || []) : []) {
         const block = document.createElement("div");
         block.className = "doc";
         const title = document.createElement("strong");
@@ -720,7 +832,7 @@
         block.append(title, meta, actions);
         wrap.append(block);
       }
-      for (const pay of workspace.payments) {
+      for (const pay of selectedPath === "company" ? workspace.payments : []) {
         const block = document.createElement("div");
         block.className = "doc";
         const title = document.createElement("strong");
@@ -743,7 +855,7 @@
         block.append(title, meta, actions);
         wrap.append(block);
       }
-      for (const pre of workspace.pres || []) {
+      for (const pre of selectedPath === "reimburse" ? (workspace.pres || []) : []) {
         const block = document.createElement("div");
         block.className = "doc";
         const title = document.createElement("strong");
@@ -782,7 +894,7 @@
         block.append(title, meta, actions);
         wrap.append(block);
       }
-      for (const expense of workspace.expenses || []) {
+      for (const expense of selectedPath === "reimburse" ? (workspace.expenses || []) : []) {
         const block = document.createElement("div");
         block.className = "doc";
         const title = document.createElement("strong");
@@ -815,14 +927,24 @@
         block.append(title, meta, actions);
         wrap.append(block);
       }
-      if (!wrap.childElementCount) wrap.textContent = "还没有单据。";
+      if (!wrap.childElementCount) {
+        wrap.textContent = selectedPath === "company"
+          ? "这条路径还没有请购或采购单。"
+          : "这条路径还没有事前申请或报销。";
+      }
       docsEl.append(wrap);
       renderAudits();
     }
 
     function renderAudits() {
       auditsEl.innerHTML = "";
-      const rows = (workspace && workspace.audits) || [];
+      const companyAudit = new Set(["PR", "PO", "GRN", "ASSET", "INV", "MATCH", "PAY", "PREPAY"]);
+      const reimburseAudit = new Set(["PRE", "EXP"]);
+      const rows = ((workspace && workspace.audits) || []).filter((row) => {
+        if (selectedPath === "company") return companyAudit.has(row.entity);
+        if (selectedPath === "reimburse") return reimburseAudit.has(row.entity);
+        return false;
+      });
       if (!rows.length) {
         auditsEl.textContent = "暂无";
         return;
@@ -944,11 +1066,35 @@
         }
         devBox.append(title, row);
       }
+      applyPathView();
       renderDocs();
     }
 
+    document.querySelector("#choose-company").addEventListener("click", () => {
+      if (!me) return;
+      rememberPath("company");
+      notice("", "");
+      applyPathView();
+      renderDocs();
+    });
+
+    document.querySelector("#choose-reimburse").addEventListener("click", () => {
+      if (!me) return;
+      rememberPath("reimburse");
+      notice("", "");
+      applyPathView();
+      renderDocs();
+    });
+
+    document.querySelector("#change-path").addEventListener("click", () => {
+      rememberPath(null);
+      notice("", "");
+      applyPathView();
+    });
+
     document.querySelector("#logout").addEventListener("click", async () => {
       await api("/auth/logout", { method: "POST", body: "{}" });
+      rememberPath(null);
       notice("", "");
       await refresh();
     });
