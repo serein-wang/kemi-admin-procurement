@@ -2,6 +2,7 @@ import type { Role } from "../domain/roles.js";
 import type {
   AssetCard,
   AuditLog,
+  BudgetHold,
   ExpenseClaim,
   Grn,
   InvoiceRegister,
@@ -39,6 +40,7 @@ export class MemoryStore {
   readonly pres = new Map<string, PreApproval>();
   readonly expenses = new Map<string, ExpenseClaim>();
   readonly assets = new Map<string, AssetCard>();
+  readonly budgetHolds = new Map<string, BudgetHold>();
   readonly vendors = new Map<string, Vendor>();
   readonly quotes = new Map<string, QuoteCompare>();
   readonly audits: AuditLog[] = [];
@@ -143,6 +145,19 @@ export class MemoryStore {
     return [...this.chases.values()]
       .filter((row) => row.prepayId === prepayId)
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+  }
+
+  budgetHoldsFor(sourceEntity: "PR" | "PO", sourceId: string): BudgetHold[] {
+    return [...this.budgetHolds.values()].filter(
+      (row) => row.sourceEntity === sourceEntity && row.sourceId === sourceId,
+    );
+  }
+
+  assetByPo(poId: string): AssetCard | undefined {
+    for (const card of this.assets.values()) {
+      if (card.poId === poId) return card;
+    }
+    return undefined;
   }
 
   reclaimByPrepay(prepayId: string): PrepayReclaim | undefined {

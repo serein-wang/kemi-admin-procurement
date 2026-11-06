@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "行政采购可嵌入模块（路径①货到付款 / 月结 / 预付 / 超期例外，路径②强制事前报销）。不依赖 KEMI One / Canvas 宿主 API。",
+  "description": "行政采购可嵌入模块（路径①货到付款 / 月结 / 预付 / 超期例外，路径②强制事前报销，阶段 4 资产卡 / 预算占用 / 双币矩阵 / 低值）。不依赖 KEMI One / Canvas 宿主 API，不回写金蝶。",
   "exports": {
     ".": "./src/index.ts"
   },

@@ -10,7 +10,7 @@ async function approvedPre(
   currency = "CNY",
 ) {
   const created = await call(app, people.applicant, "POST", "/api/pre", {
-    companyCode: "SZ",
+    companyCode: currency === "HKD" ? "HK" : "SZ",
     currency,
     deptId: "D-ADMIN",
     purpose: "垫付办公耗材",
