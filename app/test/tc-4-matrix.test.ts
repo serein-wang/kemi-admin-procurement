@@ -133,3 +133,98 @@ test("只注入一边阈值时，另一边矩阵仍是占位", async () => {
     await app.close();
   }
 });
+
+test("走查表单不提交公司；省略公司时按币种推导，并保存规格与购买链接", async () => {
+  const { app } = await boot();
+  try {
+    const page = await app.inject({ method: "GET", url: "/" });
+    assert.equal(page.statusCode, 200);
+    const html = page.body;
+    assert.equal(html.includes('name="companyCode"'), false);
+    assert.equal(html.includes("syncFromCompany"), false);
+    assert.equal(html.includes("syncFromCurrency"), false);
+    assert.equal(html.includes(">公司</label>"), false);
+    const forms = html.match(/<form id="(?:pr|pre)-form">[\s\S]*?<\/form>/g) ?? [];
+    assert.equal(forms.length, 2);
+    const [prForm, preForm] = forms;
+    assert.match(prForm ?? "", /id="pr-form"/);
+    assert.match(preForm ?? "", /id="pre-form"/);
+    for (const form of forms) {
+      assert.match(form, /<select name="currency"><option value="CNY" selected>CNY<\/option><option value="HKD">HKD<\/option><\/select>/);
+      assert.equal(form.includes("公司"), false);
+    }
+    assert.match(prForm, /name="itemName"/);
+    assert.match(prForm, /详细规格描述/);
+    assert.match(prForm, /name="spec"/);
+    assert.match(prForm, /购买链接/);
+    assert.match(prForm, /name="purchaseUrl"/);
+
+    const people = await loginActors(app);
+    const created = await call(app, people.applicant, "POST", "/api/pr", {
+      currency: "CNY",
+      deptId: "D-ADMIN",
+      purpose: "省略公司",
+      lines: [{
+        itemName: "显示器",
+        spec: "  27 寸 IPS  ",
+        purchaseUrl: " https://example.com/monitor ",
+        qty: 1,
+        estUnitPrice: "100.00",
+        category: "consumable",
+      }],
+    });
+    assert.equal(created.status, 200, JSON.stringify(created.body));
+    assert.equal(created.body.companyCode, "SZ");
+    assert.equal(created.body.currency, "CNY");
+    assert.equal(created.body.lines[0].itemName, "显示器");
+    assert.equal(created.body.lines[0].spec, "27 寸 IPS");
+    assert.equal(created.body.lines[0].purchaseUrl, "https://example.com/monitor");
+
+    const fetched = await call(app, people.applicant, "GET", `/api/pr/${created.body.id}`);
+    assert.equal(fetched.status, 200);
+    assert.equal(fetched.body.lines[0].spec, "27 寸 IPS");
+    assert.equal(fetched.body.lines[0].purchaseUrl, "https://example.com/monitor");
+
+    const hkd = await call(app, people.applicant, "POST", "/api/pr", {
+      currency: "HKD",
+      deptId: "D-HK",
+      purpose: "港币推导公司",
+      lines: [{ itemName: "插座", qty: 1, estUnitPrice: "10.00", category: "consumable" }],
+    });
+    assert.equal(hkd.status, 200, JSON.stringify(hkd.body));
+    assert.equal(hkd.body.companyCode, "HK");
+    assert.equal(hkd.body.currency, "HKD");
+    assert.equal(hkd.body.lines[0].spec, "");
+    assert.equal(hkd.body.lines[0].purchaseUrl, "");
+
+    const pre = await call(app, people.applicant, "POST", "/api/pre", {
+      currency: "CNY",
+      deptId: "D-ADMIN",
+      purpose: "事前省略公司",
+      amount: "80.00",
+    });
+    assert.equal(pre.status, 200, JSON.stringify(pre.body));
+    assert.equal(pre.body.companyCode, "SZ");
+    assert.equal(pre.body.currency, "CNY");
+
+    const preHkd = await call(app, people.applicant, "POST", "/api/pre", {
+      currency: "HKD",
+      deptId: "D-HK",
+      purpose: "事前港币",
+      amount: "80.00",
+    });
+    assert.equal(preHkd.status, 200, JSON.stringify(preHkd.body));
+    assert.equal(preHkd.body.companyCode, "HK");
+
+    const tooLong = await call(app, people.applicant, "POST", "/api/pr", {
+      currency: "CNY",
+      deptId: "D-ADMIN",
+      purpose: "规格过长",
+      lines: [{ itemName: "纸", spec: "规".repeat(1001), qty: 1, estUnitPrice: "1.00", category: "consumable" }],
+    });
+    assert.equal(tooLong.status, 400);
+    assert.equal(tooLong.body.error, "INVALID_INPUT");
+  } finally {
+    await app.close();
+  }
+});
