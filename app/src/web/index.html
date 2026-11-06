@@ -3,51 +3,247 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>行政采购 · 阶段 3</title>
+  <title>行政采购 · 阶段 4</title>
   <style>
-    :root { color-scheme: light; --ink: #1c2430; --muted: #5c6b7a; --line: #d5dde5; --paper: #f4f7f8; --card: #fff; --accent: #0f4c5c; }
+    /* Tokens from erp-pro public CSS (Element Plus + shell). Not from KEMI One Canvas. */
+    :root {
+      color-scheme: light;
+      --ink: #243b57;
+      --muted: #77879a;
+      --line: #e2e8f0;
+      --paper: #f6f8fb;
+      --card: #fff;
+      --blue: #306bb2;
+      --blue-soft: #eef5ff;
+      --el-primary: #409eff;
+      --el-primary-hover: #66b1ff;
+      --danger: #f56c6c;
+      --danger-hover: #f78989;
+      --success: #67c23a;
+      --warning: #e6a23c;
+      --info: #909399;
+      --text: #334155;
+      --control: #dcdfe6;
+      --radius: 4px;
+      --radius-card: 8px;
+      --el-font: "Helvetica Neue", Helvetica, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "微软雅黑", Arial, sans-serif;
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; font: 15px/1.5 "Segoe UI", "PingFang SC", "Noto Sans SC", sans-serif; color: var(--ink); background: var(--paper); }
-    header, main { width: min(1100px, calc(100% - 32px)); margin: 0 auto; }
-    header { padding: 24px 0 8px; }
-    h1 { font-size: 22px; margin: 0 0 4px; }
-    h2 { font-size: 16px; margin: 0 0 12px; }
-    p { margin: 0; color: var(--muted); }
-    .grid { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 16px 0 40px; }
-    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 12px; }
-    label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
+    [hidden] { display: none !important; }
+    body {
+      margin: 0;
+      font: 14px/1.5 var(--el-font);
+      color: var(--ink);
+      background: var(--paper);
+    }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: #f6f8fb;
+      border-bottom: 1px solid #e2e8f0;
+    }
+    .topbar-inner, main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+    .topbar-inner {
+      min-height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 8px 0;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .mark {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      background: #306bb2;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      display: grid;
+      place-items: center;
+      flex: none;
+    }
+    .product { font-size: 12px; color: var(--muted); line-height: 1.2; }
+    h1 { font-size: 16px; font-weight: 600; margin: 0; color: var(--ink); line-height: 1.35; }
+    h2 {
+      font-size: 14px;
+      font-weight: 600;
+      margin: -14px -14px 12px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+      color: var(--ink);
+    }
+    .session {
+      font-size: 13px;
+      color: var(--text);
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 6px 10px;
+      max-width: min(460px, 100%);
+      line-height: 1.4;
+    }
+    .lede {
+      margin: 14px 0 0;
+      padding: 10px 12px;
+      background: #f6f8fb;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-card);
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .grid { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 14px 0 40px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-card);
+      padding: 14px;
+      margin-bottom: 12px;
+      overflow: hidden;
+    }
+    label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
     input, select, button { font: inherit; }
-    input, select { width: 100%; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
-    button, .linkish { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 7px 10px; cursor: pointer; text-decoration: none; display: inline-block; }
-    button.ghost { background: #e8eef1; color: var(--ink); }
-    button.danger { background: #8c3a3a; }
-    .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-    .banner { padding: 8px 10px; border-radius: 6px; background: #fff6e8; color: #6a4b16; margin-top: 8px; }
-    .error { background: #fdecec; color: #7a2424; }
-    .ok { background: #e8f6ef; color: #1d5c3a; }
-    .doc { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px; }
-    .meta { color: var(--muted); font-size: 13px; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: left; border-bottom: 1px solid var(--line); padding: 6px 4px; vertical-align: top; }
-    @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+    input, select {
+      width: 100%;
+      height: 32px;
+      padding: 0 10px;
+      border: 1px solid var(--control);
+      border-radius: var(--radius);
+      background: #fff;
+      color: var(--ink);
+      outline: none;
+    }
+    select {
+      appearance: none;
+      padding-right: 28px;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path fill='%2377879a' d='M2.1 4.2 6 8.1 9.9 4.2l-.9-.9L6 6.3 3 3.3z'/></svg>");
+      background-repeat: no-repeat;
+      background-position: right 8px center;
+    }
+    input:focus, select:focus {
+      border-color: var(--el-primary);
+      box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.16);
+    }
+    button, .linkish {
+      height: 32px;
+      padding: 0 14px;
+      border-radius: var(--radius);
+      border: 1px solid var(--el-primary);
+      background: var(--el-primary);
+      color: #fff;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      white-space: nowrap;
+      line-height: 1;
+    }
+    button:hover, .linkish:hover { background: var(--el-primary-hover); border-color: var(--el-primary-hover); }
+    button.ghost {
+      background: #fff;
+      color: var(--text);
+      border-color: var(--control);
+    }
+    button.ghost:hover {
+      color: var(--el-primary);
+      border-color: #c6e2ff;
+      background: #ecf5ff;
+    }
+    button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+    button.danger:hover { background: var(--danger-hover); border-color: var(--danger-hover); }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; align-items: center; }
+    .row input, .row select { width: auto; min-width: 128px; max-width: 240px; flex: 1 1 140px; }
+    .hint { margin: 12px 0 0; color: var(--muted); font-size: 12px; }
+    .role-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0;
+      margin-top: 6px;
+      border-bottom: 1px solid var(--line);
+    }
+    .role-tabs button {
+      height: 36px;
+      padding: 0 12px;
+      background: transparent;
+      color: var(--muted);
+      border: 0;
+      border-bottom: 2px solid transparent;
+      border-radius: 0;
+      font-weight: 400;
+    }
+    .role-tabs button:hover { color: var(--blue); background: var(--blue-soft); border-color: transparent; }
+    .role-tabs button.active {
+      color: var(--blue);
+      background: var(--blue-soft);
+      border-bottom-color: var(--blue);
+      font-weight: 600;
+    }
+    .banner {
+      padding: 8px 12px;
+      border-radius: var(--radius);
+      background: #fdf6ec;
+      color: var(--warning);
+      border: 1px solid #faecd8;
+      font-size: 13px;
+      margin-top: 8px;
+    }
+    .banner.error { background: #fef0f0; color: var(--danger); border-color: #fde2e2; }
+    .banner.ok { background: #f0f9eb; color: var(--success); border-color: #e1f3d8; }
+    #notice:empty { display: none; }
+    #notice .banner { margin-bottom: 12px; }
+    .doc {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-card);
+      padding: 10px 12px;
+      margin-top: 10px;
+      background: #fff;
+    }
+    .doc strong { display: block; color: var(--ink); font-size: 14px; font-weight: 600; }
+    .meta { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    #audits { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; border: 1px solid #ebeef5; }
+    th, td { text-align: left; border-bottom: 1px solid #ebeef5; padding: 8px 10px; vertical-align: top; }
+    th { background: #f5f7fa; color: var(--muted); font-weight: 500; }
+    td { color: var(--text); }
+    tbody tr:hover td { background: #f6f8fb; }
+    @media (max-width: 800px) {
+      .grid { grid-template-columns: 1fr; }
+      .topbar-inner { align-items: flex-start; flex-direction: column; padding: 10px 0; }
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1>行政采购（非生产）</h1>
-    <p>路径①货到付款 / 月结 / 预付 / 超期例外，以及路径②强制事前报销。身份走 KEMI OIDC。角色、SoD 与阈值都在本模块。不做金蝶回写。</p>
-  </header>
-  <main class="grid">
-    <section>
-      <div class="card">
-        <h2>登录</h2>
-        <div id="session" class="meta">正在读取会话…</div>
-        <div class="row">
-          <a class="linkish" id="kemi-login" href="__PREFIX__/auth/login">用 KEMI 登录</a>
-          <button class="ghost" id="logout" type="button" hidden>退出</button>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">ERP</span>
+        <div>
+          <div class="product">新智联ERP智能平台</div>
+          <h1>行政采购 · 阶段 4</h1>
         </div>
-        <div id="dev-box"></div>
       </div>
+      <div id="session" class="session">正在读取会话…</div>
+    </div>
+  </header>
+  <main>
+    <p class="lede">路径①货到付款 / 月结 / 预付 / 超期例外，以及路径②强制事前报销。身份走 KEMI OIDC。角色、SoD 与阈值都在本模块。不做金蝶回写。</p>
+    <div class="card">
+      <h2>登录</h2>
+      <div class="row">
+        <a class="linkish" id="kemi-login" href="__PREFIX__/auth/login">用 KEMI 登录</a>
+        <button class="ghost" id="logout" type="button" hidden>退出</button>
+      </div>
+      <div id="dev-box"></div>
+    </div>
+    <div class="grid">
+    <section>
       <div class="card">
         <h2>①-1 新建请购</h2>
         <form id="pr-form">
@@ -103,6 +299,7 @@
         <div id="audits" class="meta">暂无</div>
       </div>
     </section>
+    </div>
   </main>
   <script>
     const PREFIX = "__PREFIX__";
@@ -631,15 +828,30 @@
         company.addEventListener("change", syncFromCompany);
         currency.addEventListener("change", syncFromCurrency);
       }
+      try {
+        const meRes = await api("/auth/me");
+        me = meRes.user;
+        sessionEl.textContent = me.displayName + " · " + me.ucUserId + " · " + (me.roles.join(" / ") || "无角色") + " · " + me.status;
+        logoutBtn.hidden = false;
+        workspace = await api("/api/workspace");
+      } catch (error) {
+        me = null;
+        workspace = null;
+        sessionEl.textContent = "未登录";
+        logoutBtn.hidden = true;
+      }
       if (meta.devLogin) {
         const title = document.createElement("p");
+        title.className = "hint";
         title.textContent = "本地走查账号（ALLOW_DEV_LOGIN）。不是 KEMI 身份源。";
         const row = document.createElement("div");
-        row.className = "row";
+        row.className = "role-tabs";
         for (const user of meta.demoUsers) {
           const btn = document.createElement("button");
           btn.type = "button";
-          btn.className = "ghost";
+          const active = Boolean(me && me.ucUserId === user.ucUserId);
+          btn.className = active ? "chip active" : "chip";
+          btn.setAttribute("aria-pressed", active ? "true" : "false");
           btn.textContent = user.displayName;
           btn.addEventListener("click", async () => {
             try {
@@ -653,18 +865,6 @@
           row.append(btn);
         }
         devBox.append(title, row);
-      }
-      try {
-        const meRes = await api("/auth/me");
-        me = meRes.user;
-        sessionEl.textContent = me.displayName + " · " + me.ucUserId + " · " + (me.roles.join(" / ") || "无角色") + " · " + me.status;
-        logoutBtn.hidden = false;
-        workspace = await api("/api/workspace");
-      } catch (error) {
-        me = null;
-        workspace = null;
-        sessionEl.textContent = "未登录";
-        logoutBtn.hidden = true;
       }
       renderDocs();
     }
