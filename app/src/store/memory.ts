@@ -1,3 +1,4 @@
+import type { ImageMime } from "../domain/images.js";
 import type { Role } from "../domain/roles.js";
 import type {
   AssetCard,
@@ -43,6 +44,8 @@ export class MemoryStore {
   readonly budgetHolds = new Map<string, BudgetHold>();
   readonly vendors = new Map<string, Vendor>();
   readonly quotes = new Map<string, QuoteCompare>();
+  /** 请购行贴图字节。单据上只保存 id 与元数据。 */
+  readonly images = new Map<string, { mime: ImageMime; bytes: Buffer; name: string }>();
   readonly audits: AuditLog[] = [];
   roleAssignments: RoleAssignment[] = [];
   private seq = 0;

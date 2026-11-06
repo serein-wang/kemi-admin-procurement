@@ -122,6 +122,14 @@ export interface PublicUser {
   roles: Role[];
 }
 
+/** 请购行贴图。字节在仓储里，接口只带元数据，页面用附件路由取图。 */
+export interface PrLineImage {
+  id: string;
+  mime: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+  name: string;
+  byteLength: number;
+}
+
 export interface PrLine {
   itemName: string;
   spec: string;
@@ -131,6 +139,7 @@ export interface PrLine {
   estUnitPrice: string;
   estAmount: string;
   category: AdminCategory;
+  images: PrLineImage[];
 }
 
 export interface PurchaseRequisition {
@@ -526,6 +535,7 @@ export interface CreatePrInput {
     qty: number;
     estUnitPrice: string;
     category: string;
+    images?: Array<{ name?: string; dataUrl?: string }>;
   }>;
 }
 

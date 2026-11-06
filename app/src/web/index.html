@@ -219,6 +219,40 @@
     th { background: #f5f7fa; color: var(--muted); font-weight: 500; }
     td { color: var(--text); }
     tbody tr:hover td { background: #f6f8fb; }
+    .dropzone {
+      border: 1px dashed var(--control);
+      border-radius: var(--radius);
+      background: #fafcff;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+      padding: 10px;
+      cursor: pointer;
+    }
+    .dropzone.over {
+      border-color: var(--el-primary);
+      background: var(--blue-soft);
+      color: var(--blue);
+    }
+    .thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .thumbs figure { margin: 0; width: 72px; }
+    .thumbs img, img.thumb {
+      width: 72px;
+      height: 72px;
+      object-fit: cover;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+      display: block;
+    }
+    .thumbs figcaption {
+      font-size: 11px;
+      color: var(--muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .thumbs button { height: 24px; margin-top: 4px; padding: 0 6px; font-size: 12px; }
     @media (max-width: 800px) {
       .grid { grid-template-columns: 1fr; }
       .topbar-inner { align-items: flex-start; flex-direction: column; padding: 10px 0; }
@@ -257,12 +291,15 @@
           <input name="purpose" value="会议室显示器" required />
           <label>部门</label>
           <input name="deptId" value="D-ADMIN" required />
-          <label>币种</label>
-          <select name="currency"><option value="CNY" selected>CNY</option><option value="HKD">HKD</option></select>
+          <p class="hint">币种固定为 CNY。</p>
           <label>品名</label>
           <input name="itemName" value="显示器" required />
           <label>详细规格描述</label>
-          <textarea name="spec" maxlength="1000" placeholder="尺寸、型号、配置">27 寸 IPS，壁挂支架</textarea>
+          <textarea name="spec" maxlength="1000" placeholder="尺寸、型号、配置。可在此粘贴图片">27 寸 IPS，壁挂支架</textarea>
+          <label>贴图</label>
+          <div id="pr-images" class="dropzone" tabindex="0">点击选择、拖入，或在此与规格框内粘贴图片。最多 4 张，每张 2MB，png / jpeg / gif / webp。</div>
+          <input id="pr-image-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden />
+          <div id="pr-image-preview" class="thumbs"></div>
           <label>购买链接</label>
           <input name="purchaseUrl" type="url" maxlength="2000" value="https://example.com/monitor" placeholder="https://" />
           <label>数量</label>
@@ -286,8 +323,7 @@
           <input name="purpose" value="垫付办公耗材" required />
           <label>部门</label>
           <input name="deptId" value="D-ADMIN" required />
-          <label>币种</label>
-          <select name="currency"><option value="CNY" selected>CNY</option><option value="HKD">HKD</option></select>
+          <p class="hint">币种固定为 CNY。</p>
           <label>金额</label>
           <input name="amount" value="80.00" required />
           <div class="row"><button type="submit">创建事前草稿</button></div>
@@ -435,6 +471,7 @@
           detail.textContent = lineDetail;
           block.append(detail);
         }
+        appendLineImages(block, pr.lines);
         block.append(actions);
         wrap.append(block);
       }
@@ -452,6 +489,8 @@
           + " · 验收人应是 " + userName(po.applicantId)
           + " · D4 " + po.disposition
           + (po.erpInboundRefs.length ? " · 入库 " + po.erpInboundRefs.join(",") : "");
+        block.append(title, meta);
+        appendLineImages(block, po.lines);
         const actions = document.createElement("div");
         actions.className = "row";
         if ((po.status === "awaiting_receipt" || po.status === "partially_received") && me && me.id === po.applicantId) {
@@ -524,7 +563,7 @@
         if (po.status === "matched" && hasRole("admin") && livePrepay && livePrepay.status === "settled_with_balance") {
           actions.append(button("发起尾款", "pay-request", po.id));
         }
-        block.append(title, meta, actions);
+        block.append(actions);
         wrap.append(block);
       }
       for (const card of workspace.assets || []) {
@@ -814,6 +853,26 @@
       auditsEl.append(table);
     }
 
+    function appendLineImages(parent, lines) {
+      const shots = [];
+      for (const line of lines || []) {
+        for (const image of line.images || []) {
+          if (image && typeof image.id === "string" && /^IMG-\d+$/.test(image.id)) shots.push(image);
+        }
+      }
+      if (!shots.length) return;
+      const row = document.createElement("div");
+      row.className = "thumbs";
+      for (const image of shots) {
+        const img = document.createElement("img");
+        img.className = "thumb";
+        img.alt = typeof image.name === "string" && image.name ? image.name : "贴图";
+        img.src = PREFIX + "/api/attachments/" + encodeURIComponent(image.id);
+        row.append(img);
+      }
+      parent.append(row);
+    }
+
     function prLineDetail(lines) {
       const rows = [];
       for (const line of lines || []) {
@@ -901,7 +960,7 @@
         const created = await api("/api/pre", {
           method: "POST",
           body: JSON.stringify({
-            currency: form.get("currency"),
+            currency: "CNY",
             deptId: form.get("deptId"),
             purpose: form.get("purpose"),
             amount: String(form.get("amount")),
@@ -914,14 +973,133 @@
       }
     });
 
+    const prImages = [];
+    let prImageReads = 0;
+    const PR_IMAGE_LIMIT = 4;
+    const PR_IMAGE_BYTES = 2 * 1024 * 1024;
+    const PR_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+    function renderPrImages() {
+      const box = document.querySelector("#pr-image-preview");
+      box.replaceChildren();
+      for (const item of prImages) {
+        const fig = document.createElement("figure");
+        const img = document.createElement("img");
+        img.alt = item.name;
+        img.src = item.objectUrl;
+        const cap = document.createElement("figcaption");
+        cap.textContent = item.name;
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "ghost";
+        remove.textContent = "移除";
+        remove.addEventListener("click", () => {
+          URL.revokeObjectURL(item.objectUrl);
+          const index = prImages.indexOf(item);
+          if (index >= 0) prImages.splice(index, 1);
+          renderPrImages();
+        });
+        fig.append(img, cap, remove);
+        box.append(fig);
+      }
+    }
+
+    function takeImageFiles(fileList) {
+      const files = Array.from(fileList || []);
+      for (const file of files) {
+        if (!PR_IMAGE_TYPES.includes(file.type)) {
+          notice("error", "贴图仅支持 png、jpeg、gif、webp");
+          continue;
+        }
+        if (file.size > PR_IMAGE_BYTES) {
+          notice("error", "单张贴图不能超过 2MB");
+          continue;
+        }
+        if (prImages.length + prImageReads >= PR_IMAGE_LIMIT) {
+          notice("error", "每行最多 4 张贴图");
+          break;
+        }
+        const objectUrl = URL.createObjectURL(file);
+        prImageReads += 1;
+        const reader = new FileReader();
+        reader.onload = () => {
+          prImageReads -= 1;
+          const dataUrl = typeof reader.result === "string" ? reader.result : "";
+          if (!dataUrl.startsWith("data:image/")) {
+            URL.revokeObjectURL(objectUrl);
+            notice("error", "贴图读取失败");
+            return;
+          }
+          prImages.push({ name: file.name || "image", dataUrl: dataUrl, objectUrl: objectUrl });
+          renderPrImages();
+        };
+        reader.onerror = () => {
+          prImageReads -= 1;
+          URL.revokeObjectURL(objectUrl);
+          notice("error", "贴图读取失败");
+        };
+        reader.readAsDataURL(file);
+      }
+    }
+
+    function imageFilesFromClipboard(event) {
+      const items = event.clipboardData && event.clipboardData.items;
+      if (!items) return [];
+      const files = [];
+      for (const item of items) {
+        if (item.kind === "file") {
+          const file = item.getAsFile();
+          if (file) files.push(file);
+        }
+      }
+      return files;
+    }
+
+    function onImagePaste(event) {
+      const files = imageFilesFromClipboard(event);
+      if (!files.length) return;
+      event.preventDefault();
+      takeImageFiles(files);
+    }
+
+    function clearPrImages() {
+      for (const item of prImages) URL.revokeObjectURL(item.objectUrl);
+      prImages.length = 0;
+      renderPrImages();
+    }
+
+    const prImageZone = document.querySelector("#pr-images");
+    const prImageFile = document.querySelector("#pr-image-file");
+    prImageZone.addEventListener("click", () => prImageFile.click());
+    prImageFile.addEventListener("change", () => {
+      takeImageFiles(prImageFile.files);
+      prImageFile.value = "";
+    });
+    prImageZone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      prImageZone.classList.add("over");
+    });
+    prImageZone.addEventListener("dragleave", () => prImageZone.classList.remove("over"));
+    prImageZone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      prImageZone.classList.remove("over");
+      takeImageFiles(event.dataTransfer && event.dataTransfer.files);
+    });
+    prImageZone.addEventListener("paste", onImagePaste);
+    document.querySelector("#pr-form textarea[name=spec]").addEventListener("paste", onImagePaste);
+
     document.querySelector("#pr-form").addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (prImageReads > 0) {
+        notice("error", "贴图还在读取，请稍后再创建");
+        return;
+      }
       const form = new FormData(event.target);
       try {
         const created = await api("/api/pr", {
           method: "POST",
           body: JSON.stringify({
-            currency: form.get("currency"),
+            currency: "CNY",
             deptId: form.get("deptId"),
             purpose: form.get("purpose"),
             lines: [{
@@ -931,9 +1109,11 @@
               qty: Number(form.get("qty")),
               estUnitPrice: String(form.get("estUnitPrice")),
               category: form.get("category"),
+              images: prImages.map((item) => ({ name: item.name, dataUrl: item.dataUrl })),
             }],
           }),
         });
+        clearPrImages();
         notice("ok", "已创建 " + created.docNo);
         await refresh();
       } catch (error) {
