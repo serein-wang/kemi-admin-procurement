@@ -81,7 +81,18 @@ export function loadPrepayPolicy(env: NodeJS.ProcessEnv): PrepayPolicy {
   }
   policy.allowFullPrepay = env.ALLOW_FULL_PREPAY === "true";
   policy.inheritPrMatrix = env.PREPAY_INHERIT_PR_MATRIX === "true";
+  policy.overdueDays = loadOverdueDays(env);
   return policy;
+}
+
+/** 空值与占位符都是未配置。不给超期天数填默认数字。 */
+function loadOverdueDays(env: NodeJS.ProcessEnv): number | null {
+  const text = env.PREPAY_OVERDUE_DAYS?.trim() ?? "";
+  if (!text || text.toUpperCase() === "PLACEHOLDER" || text === "PREPAY_OVERDUE_DAYS") return null;
+  if (!/^[1-9]\d{0,4}$/.test(text)) {
+    throw new DomainError("THRESHOLD_CONFIG_INVALID", "PREPAY_OVERDUE_DAYS 必须是正整数天数", 422);
+  }
+  return Number(text);
 }
 
 export interface AppEnv {

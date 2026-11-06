@@ -2,10 +2,14 @@ import type { Role } from "../domain/roles.js";
 import type {
   AssetCard,
   AuditLog,
+  ExpenseClaim,
   Grn,
   InvoiceRegister,
   MatchSheet,
+  OverdueChase,
   Payment,
+  PreApproval,
+  PrepayReclaim,
   PrepayRefund,
   PrepayRequest,
   PrepaySettle,
@@ -30,6 +34,10 @@ export class MemoryStore {
   readonly prepays = new Map<string, PrepayRequest>();
   readonly settles = new Map<string, PrepaySettle>();
   readonly refunds = new Map<string, PrepayRefund>();
+  readonly chases = new Map<string, OverdueChase>();
+  readonly reclaims = new Map<string, PrepayReclaim>();
+  readonly pres = new Map<string, PreApproval>();
+  readonly expenses = new Map<string, ExpenseClaim>();
   readonly assets = new Map<string, AssetCard>();
   readonly vendors = new Map<string, Vendor>();
   readonly quotes = new Map<string, QuoteCompare>();
@@ -127,6 +135,19 @@ export class MemoryStore {
   refundByPrepay(prepayId: string): PrepayRefund | undefined {
     for (const refund of this.refunds.values()) {
       if (refund.prepayId === prepayId) return refund;
+    }
+    return undefined;
+  }
+
+  chasesByPrepay(prepayId: string): OverdueChase[] {
+    return [...this.chases.values()]
+      .filter((row) => row.prepayId === prepayId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+  }
+
+  reclaimByPrepay(prepayId: string): PrepayReclaim | undefined {
+    for (const reclaim of this.reclaims.values()) {
+      if (reclaim.prepayId === prepayId) return reclaim;
     }
     return undefined;
   }

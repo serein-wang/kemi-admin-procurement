@@ -1,6 +1,6 @@
 # 行政采购 Web/API
 
-本仓独立运行的路径①服务（货到付款 / 月结 / 预付）。页面和接口都在这里，不依赖 Canvas / KEMI One 宿主仓。`registerAdminProcurement` 留作以后嵌入。说明见 [`docs/09-开发脚手架.md`](../docs/09-开发脚手架.md)。
+本仓独立运行的行政采购服务（路径①货到付款 / 月结 / 预付 / 超期例外，以及路径②强制事前报销）。页面和接口都在这里，不依赖 Canvas / KEMI One 宿主仓。`registerAdminProcurement` 留作以后嵌入。说明见 [`docs/09-开发脚手架.md`](../docs/09-开发脚手架.md)。
 
 ```bash
 cp .env.example .env

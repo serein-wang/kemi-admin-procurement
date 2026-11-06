@@ -20,6 +20,8 @@ export const THRESHOLD_KEYS = [
   "THR_HKD_PREPAY_CEO",
   "THR_CNY_PREPAY_CONTRACT",
   "THR_HKD_PREPAY_CONTRACT",
+  "THR_CNY_REIM",
+  "THR_HKD_REIM",
 ] as const;
 
 export type ThresholdKey = (typeof THRESHOLD_KEYS)[number];
@@ -43,6 +45,8 @@ export function emptyThresholds(): ThresholdConfig {
     THR_HKD_PREPAY_CEO: null,
     THR_CNY_PREPAY_CONTRACT: null,
     THR_HKD_PREPAY_CONTRACT: null,
+    THR_CNY_REIM: null,
+    THR_HKD_REIM: null,
   };
 }
 
@@ -54,10 +58,12 @@ export interface PrepayPolicy {
   ratioMax: string | null;
   allowFullPrepay: boolean;
   inheritPrMatrix: boolean;
+  /** Q11。null 表示 PREPAY_OVERDUE_DAYS 仍是占位，不套默认天数。 */
+  overdueDays: number | null;
 }
 
 export function emptyPrepayPolicy(): PrepayPolicy {
-  return { ratioMax: null, allowFullPrepay: false, inheritPrMatrix: false };
+  return { ratioMax: null, allowFullPrepay: false, inheritPrMatrix: false, overdueDays: null };
 }
 
 export type PrepayThresholdKind = "fin" | "ceo" | "contract";
@@ -65,6 +71,11 @@ export type PrepayThresholdKind = "fin" | "ceo" | "contract";
 export function prepayThresholdKey(currency: CurrencyCode, kind: PrepayThresholdKind): ThresholdKey {
   const suffix = kind === "fin" ? "PREPAY_FIN" : kind === "ceo" ? "PREPAY_CEO" : "PREPAY_CONTRACT";
   return `THR_${currency}_${suffix}`;
+}
+
+/** D5。低额 < THR_*_REIM；达到该额为超额，须 ②-7。 */
+export function reimburseThresholdKey(currency: CurrencyCode): ThresholdKey {
+  return `THR_${currency}_REIM`;
 }
 
 export function thresholdKey(currency: CurrencyCode, kind: ThresholdKind): ThresholdKey {

@@ -13,6 +13,7 @@ import { isRole, type Role } from "../domain/roles.js";
 import {
   approvalBand,
   prepayThresholdKey,
+  reimburseThresholdKey,
   thresholdKey,
   type ApprovalBand,
   type CurrencyCode,
@@ -24,15 +25,21 @@ import {
 import type {
   AssetCard,
   AuditLog,
+  ChaseOutcome,
   CompanyCode,
   CreatePrInput,
   Dp2Result,
+  ExpenseClaim,
   Grn,
   InvoiceRegister,
   MatchSheet,
+  OverdueChase,
+  OverdueListItem,
   Payment,
   PaymentTerms,
+  PreApproval,
   PrepayAttachment,
+  PrepayReclaim,
   PrepayRefund,
   PrepayRequest,
   PrepaySettle,
@@ -56,10 +63,11 @@ export interface ServiceDeps {
 }
 
 /**
- * 路径①货到付款 / 月结 / 预付（①-P1…①-P10）。
- * 状态以 docs/02、docs/03、docs/06 为准。
+ * 路径①货到付款 / 月结 / 预付（①-P*）/ 例外（①-E*）与路径②报销。
+ * 状态以 docs/02、docs/03、docs/04、docs/06 为准。
  * SoD 在迁移前拒绝，不提供绕过。
- * 不做 ①-E*、报销、金蝶回写。入库仍走行政物资 stub。
+ * Q5：require_pre_approval 固定为 true，没有配置开关。
+ * 不做金蝶回写。入库仍走行政物资 stub。
  */
 export class ProcurementService {
   private readonly store: MemoryStore;
@@ -1084,6 +1092,9 @@ export class ProcurementService {
       paymentApproverId: null,
       payerId: null,
       bankRef: null,
+      paidAt: null,
+      overdueFlag: false,
+      promisedDeliveryDate: null,
       accrualBy: null,
       accrualVoucherRef: null,
       financeGate: "pending",
@@ -1281,8 +1292,9 @@ export class ProcurementService {
     if (ref.length > 64) this.fail("INVALID_BANK_REF", "银行回单号过长");
     prepay.payerId = actor.id;
     prepay.bankRef = ref;
+    prepay.paidAt = this.now();
     prepay.status = "paid";
-    prepay.updatedAt = this.now();
+    prepay.updatedAt = prepay.paidAt;
     this.audit({
       entity: "PREPAY",
       entityId: prepay.id,
@@ -1556,13 +1568,664 @@ export class ProcurementService {
     return clone(refund);
   }
 
-  getPrepay(id: string): { prepay: PrepayRequest; settle: PrepaySettle | null; refund: PrepayRefund | null } {
+  /**
+   * ①-E1。财务按 PREPAY_OVERDUE_DAYS 列出已付未验收超期清单，并把仍在待到货的单据标成 overdue_flagged。
+   * 天数未配置时拒绝，不套默认天数。
+   */
+  scanPrepayOverdue(actorId: string): {
+    overdueDays: number;
+    asOf: string;
+    items: OverdueListItem[];
+    flagged: string[];
+  } {
+    const actor = this.requireUser(actorId);
+    this.requireRole(actor, "finance");
+    const now = this.clock();
+    const collected = this.collectOverdue(now);
+    const flagged: string[] = [];
+    for (const item of collected.items) {
+      if (item.status !== "awaiting_delivery") continue;
+      const prepay = this.prepay(item.prepayId);
+      const from = prepay.status;
+      prepay.overdueFlag = true;
+      prepay.status = "overdue_flagged";
+      prepay.updatedAt = now.toISOString();
+      this.audit({
+        entity: "PREPAY",
+        entityId: prepay.id,
+        fromStatus: from,
+        toStatus: "overdue_flagged",
+        actorId: actor.id,
+        comment: `①-E1 超期清单：已付 ${item.ageDays} 天未验收，阈值 ${collected.overdueDays} 天`,
+        skipped: false,
+      });
+      item.status = "overdue_flagged";
+      item.flagged = true;
+      flagged.push(prepay.id);
+    }
+    return { overdueDays: collected.overdueDays, asOf: now.toISOString(), items: collected.items, flagged };
+  }
+
+  listPrepayOverdue(): { overdueDays: number; asOf: string; items: OverdueListItem[] } {
+    const now = this.clock();
+    const collected = this.collectOverdue(now);
+    return { overdueDays: collected.overdueDays, asOf: now.toISOString(), items: collected.items };
+  }
+
+  recordPrepayChase(
+    actorId: string,
+    prepayId: string,
+    input: { outcome: string; note?: string; promisedDeliveryDate?: string },
+  ): OverdueChase {
+    const actor = this.requireUser(actorId);
+    this.requireRole(actor, "admin");
+    const prepay = this.prepay(prepayId);
+    if (prepay.status !== "overdue_flagged" && prepay.status !== "chasing") {
+      this.fail("INVALID_STATE", "只有超期清单中的预付可以跟催", 409);
+    }
+    const outcome = this.chaseOutcome(input.outcome);
+    const note = this.requiredText(input.note ?? "", "跟催记录");
+    let promisedDeliveryDate: string | null = null;
+    if (outcome === "promised") {
+      promisedDeliveryDate = this.isoDate(input.promisedDeliveryDate ?? "", "承诺交期");
+      const today = utcDay(this.clock());
+      if (promisedDeliveryDate <= today) {
+        this.fail("INVALID_DATE", "承诺交期必须晚于今天", 422);
+      }
+    } else if ((input.promisedDeliveryDate ?? "").trim()) {
+      this.fail("INVALID_INPUT", "无果跟催不填写承诺交期");
+    }
+    const now = this.now();
+    const id = this.store.nextId("CHS");
+    const chase: OverdueChase = {
+      id,
+      docNo: id,
+      prepayId: prepay.id,
+      outcome,
+      note,
+      promisedDeliveryDate,
+      actorId: actor.id,
+      createdAt: now,
+    };
+    this.store.chases.set(chase.id, chase);
+    prepay.promisedDeliveryDate = promisedDeliveryDate;
+    const from = prepay.status;
+    if (from === "overdue_flagged") prepay.status = "chasing";
+    prepay.updatedAt = now;
+    if (from !== prepay.status) {
+      this.audit({
+        entity: "PREPAY",
+        entityId: prepay.id,
+        fromStatus: from,
+        toStatus: prepay.status,
+        actorId: actor.id,
+        comment: outcome === "promised" ? `①-E2 跟催，供应商承诺 ${promisedDeliveryDate}` : "①-E2 跟催，无果",
+        skipped: false,
+      });
+    }
+    this.audit({
+      entity: "CHASE",
+      entityId: chase.id,
+      fromStatus: null,
+      toStatus: outcome,
+      actorId: actor.id,
+      comment: note,
+      skipped: false,
+    });
+    return clone(chase);
+  }
+
+  requestPrepayReclaim(actorId: string, prepayId: string): PrepayReclaim {
+    const actor = this.requireUser(actorId);
+    this.requireRole(actor, "admin");
+    const prepay = this.prepay(prepayId);
+    this.assertStatus(prepay.status, "chasing", "预付");
+    if (this.store.chasesByPrepay(prepay.id).length < 1) {
+      this.fail("CHASE_REQUIRED", "追索前必须先有跟催记录", 409);
+    }
+    if (this.store.reclaimByPrepay(prepay.id)) this.fail("INVALID_STATE", "追索已存在", 409);
+    const today = utcDay(this.clock());
+    if (prepay.promisedDeliveryDate && prepay.promisedDeliveryDate >= today) {
+      this.fail("PROMISE_OPEN", "供应商承诺交期未到，不能发起追索", 409);
+    }
+    const now = this.now();
+    const id = this.store.nextId("RCL");
+    const reclaim: PrepayReclaim = {
+      id,
+      docNo: id,
+      prepayId: prepay.id,
+      amount: prepay.amount,
+      status: "requested",
+      requestedBy: actor.id,
+      executorId: null,
+      bankRef: null,
+      reversalVoucherRef: null,
+      disputeReason: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.store.reclaims.set(reclaim.id, reclaim);
+    prepay.status = "reclaim_requested";
+    prepay.updatedAt = now;
+    this.audit({
+      entity: "RECLAIM",
+      entityId: reclaim.id,
+      fromStatus: null,
+      toStatus: "requested",
+      actorId: actor.id,
+      comment: "①-E3 退款/追索申请",
+      skipped: false,
+    });
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: "chasing",
+      toStatus: "reclaim_requested",
+      actorId: actor.id,
+      comment: "①-E3 追索启动",
+      skipped: false,
+    });
+    return clone(reclaim);
+  }
+
+  executePrepayReclaim(
+    actorId: string,
+    prepayId: string,
+    input: { outcome: string; bankRef?: string; reversalVoucherRef?: string; disputeReason?: string },
+  ): PrepayReclaim {
+    const actor = this.requireUser(actorId);
+    this.requireRole(actor, "cashier");
+    const prepay = this.prepay(prepayId);
+    const reclaim = this.reclaimOf(prepay.id);
+    this.assertStatus(prepay.status, "reclaim_requested", "预付");
+    this.assertStatus(reclaim.status, "requested", "追索");
+    if (actor.id === reclaim.requestedBy) {
+      this.fail("RECLAIM_EXECUTOR_CONFLICT", "追索申请人不得执行收款", 409);
+    }
+    const po = this.po(prepay.poId);
+    const now = this.now();
+    if (input.outcome === "reclaimed") {
+      const bankRef = this.requiredText(input.bankRef ?? "", "银行回单号");
+      if (bankRef.length > 64) this.fail("INVALID_BANK_REF", "银行回单号过长");
+      const reversalVoucherRef = this.requiredText(input.reversalVoucherRef ?? "", "冲预付凭证号");
+      if (reversalVoucherRef.length > 64) this.fail("INVALID_INPUT", "冲预付凭证号过长");
+      reclaim.bankRef = bankRef;
+      reclaim.reversalVoucherRef = reversalVoucherRef;
+      reclaim.status = "reclaimed";
+      prepay.status = "reclaimed";
+      this.audit({
+        entity: "RECLAIM",
+        entityId: reclaim.id,
+        fromStatus: "requested",
+        toStatus: "reclaimed",
+        actorId: actor.id,
+        comment: "①-E3b 出纳收款入账，并记本地冲预付凭证（不回写金蝶）",
+        skipped: false,
+      });
+      this.audit({
+        entity: "PREPAY",
+        entityId: prepay.id,
+        fromStatus: "reclaim_requested",
+        toStatus: "reclaimed",
+        actorId: actor.id,
+        comment: "超期追索已结清",
+        skipped: false,
+      });
+      this.closePo(po, actor, "①-E3b 追索结清，采购单关闭");
+    } else if (input.outcome === "disputed") {
+      if ((input.bankRef ?? "").trim() || (input.reversalVoucherRef ?? "").trim()) {
+        this.fail("INVALID_INPUT", "挂纠纷不填写回单或冲预付凭证");
+      }
+      reclaim.disputeReason = this.reasonCode(input.disputeReason, "纠纷原因码");
+      reclaim.status = "disputed";
+      prepay.status = "disputed";
+      this.audit({
+        entity: "RECLAIM",
+        entityId: reclaim.id,
+        fromStatus: "requested",
+        toStatus: "disputed",
+        actorId: actor.id,
+        comment: `①-E3b 挂纠纷，原因码 ${reclaim.disputeReason}`,
+        skipped: false,
+      });
+      this.audit({
+        entity: "PREPAY",
+        entityId: prepay.id,
+        fromStatus: "reclaim_requested",
+        toStatus: "disputed",
+        actorId: actor.id,
+        comment: "超期追索挂纠纷，采购单不关闭",
+        skipped: false,
+      });
+    } else {
+      this.fail("INVALID_INPUT", "追索执行结果仅为 reclaimed 或 disputed");
+    }
+    reclaim.executorId = actor.id;
+    reclaim.updatedAt = now;
+    prepay.overdueFlag = false;
+    prepay.updatedAt = now;
+    return clone(reclaim);
+  }
+
+  createPreApproval(
+    actorId: string,
+    input: { companyCode: string; currency: string; deptId: string; purpose: string; amount: string },
+  ): PreApproval {
+    const actor = this.requireUser(actorId);
+    this.requireRole(actor, "applicant");
+    const companyCode = this.company(input.companyCode);
+    const currency = this.currency(input.currency);
+    const deptId = this.requiredText(input.deptId, "部门");
+    const purpose = this.requiredText(input.purpose, "事由");
+    const amount = formatStored(input.amount);
+    if (compareAmount(amount, "0.00") <= 0) this.fail("INVALID_AMOUNT", "事前金额必须大于 0");
+    const now = this.now();
+    const id = this.store.nextId("PRE");
+    const pre: PreApproval = {
+      id,
+      docNo: id,
+      companyCode,
+      currency,
+      amount,
+      status: "draft",
+      applicantId: actor.id,
+      deptId,
+      purpose,
+      deptApproverId: null,
+      consumedByExpenseId: null,
+      createdAt: now,
+      updatedAt: now,
+      createdBy: actor.id,
+    };
+    this.store.pres.set(pre.id, pre);
+    this.audit({
+      entity: "PRE",
+      entityId: pre.id,
+      fromStatus: null,
+      toStatus: "draft",
+      actorId: actor.id,
+      comment: "②-1 创建事前申请草稿",
+      skipped: false,
+    });
+    return clone(pre);
+  }
+
+  submitPreApproval(actorId: string, preId: string): PreApproval {
+    const actor = this.requireUser(actorId);
+    const pre = this.preApproval(preId);
+    if (actor.id !== pre.applicantId) this.fail("FORBIDDEN_ROLE", "只有事前申请人可以提交", 403);
+    this.assertStatus(pre.status, "draft", "事前申请");
+    pre.status = "submitted";
+    pre.updatedAt = this.now();
+    this.audit({
+      entity: "PRE",
+      entityId: pre.id,
+      fromStatus: "draft",
+      toStatus: "submitted",
+      actorId: actor.id,
+      comment: "②-1 提交事前申请",
+      skipped: false,
+    });
+    return clone(pre);
+  }
+
+  approvePreApproval(actorId: string, preId: string, comment?: string): PreApproval {
+    const actor = this.requireUser(actorId);
+    const pre = this.preApproval(preId);
+    this.assertStatus(pre.status, "submitted", "事前申请");
+    this.requireRole(actor, "dept");
+    if (actor.id === pre.applicantId) {
+      this.sod(actor, "PRE", pre.id, pre.status, "S3", "S3 事前申请人不得担任部门审批人");
+    }
+    pre.deptApproverId = actor.id;
+    pre.status = "approved";
+    pre.updatedAt = this.now();
+    this.audit({
+      entity: "PRE",
+      entityId: pre.id,
+      fromStatus: "submitted",
+      toStatus: "approved",
+      actorId: actor.id,
+      comment: this.note("②-2 事前审批通过", comment),
+      skipped: false,
+    });
+    return clone(pre);
+  }
+
+  rejectPreApproval(actorId: string, preId: string, comment?: string): PreApproval {
+    const actor = this.requireUser(actorId);
+    const pre = this.preApproval(preId);
+    this.assertStatus(pre.status, "submitted", "事前申请");
+    this.requireRole(actor, "dept");
+    if (actor.id === pre.applicantId) {
+      this.sod(actor, "PRE", pre.id, pre.status, "S3", "S3 事前申请人不得担任部门审批人");
+    }
+    pre.deptApproverId = actor.id;
+    pre.status = "rejected";
+    pre.updatedAt = this.now();
+    this.audit({
+      entity: "PRE",
+      entityId: pre.id,
+      fromStatus: "submitted",
+      toStatus: "rejected",
+      actorId: actor.id,
+      comment: this.note("②-2 事前驳回", comment),
+      skipped: false,
+    });
+    return clone(pre);
+  }
+
+  cancelPreApproval(actorId: string, preId: string): PreApproval {
+    const actor = this.requireUser(actorId);
+    const pre = this.preApproval(preId);
+    if (actor.id !== pre.applicantId) this.fail("FORBIDDEN_ROLE", "只有事前申请人可以取消", 403);
+    if (pre.status !== "draft" && pre.status !== "submitted" && pre.status !== "approved") {
+      this.fail("INVALID_STATE", "当前事前申请不能取消", 409);
+    }
+    if (pre.consumedByExpenseId) this.fail("PRE_ALREADY_CONSUMED", "事前申请已被报销占用", 409);
+    const from = pre.status;
+    pre.status = "cancelled";
+    pre.updatedAt = this.now();
+    this.audit({
+      entity: "PRE",
+      entityId: pre.id,
+      fromStatus: from,
+      toStatus: "cancelled",
+      actorId: actor.id,
+      comment: "申请人取消事前申请",
+      skipped: false,
+    });
+    return clone(pre);
+  }
+
+  createExpense(
+    actorId: string,
+    input: {
+      preApprovalId?: string;
+      purpose: string;
+      amount: string;
+      invoiceNos: unknown;
+      employeeAccount: string;
+    },
+  ): ExpenseClaim {
+    const actor = this.requireUser(actorId);
+    this.requireRole(actor, "applicant");
+    const preApprovalId = (input.preApprovalId ?? "").trim();
+    if (!preApprovalId) {
+      this.fail("PRE_REQUIRED", "无事前申请不可提报销。require_pre_approval 固定为 true", 422);
+    }
+    const pre = this.store.pres.get(preApprovalId);
+    if (!pre) this.fail("PRE_REQUIRED", "事前申请不存在，不可提报销", 422);
+    if (pre.applicantId !== actor.id) this.fail("FORBIDDEN_ROLE", "只能报销自己的事前申请", 403);
+    this.assertPreOpenForExpense(pre);
+    const purpose = this.requiredText(input.purpose, "事由");
+    const amount = formatStored(input.amount);
+    if (compareAmount(amount, "0.00") <= 0) this.fail("INVALID_AMOUNT", "报销金额必须大于 0");
+    const invoiceNos = this.invoiceNos(input.invoiceNos);
+    this.assertExpenseInvoicesFree(invoiceNos);
+    const employeeAccount = this.accountNo(input.employeeAccount);
+    const now = this.now();
+    const id = this.store.nextId("EXP");
+    const expense: ExpenseClaim = {
+      id,
+      docNo: id,
+      companyCode: pre.companyCode,
+      currency: pre.currency,
+      amount,
+      status: "draft",
+      applicantId: actor.id,
+      deptId: pre.deptId,
+      purpose,
+      preApprovalId: pre.id,
+      invoiceNos,
+      employeeAccount,
+      deptApproverId: null,
+      ticketCheckerId: null,
+      financeCosignerId: null,
+      payerId: null,
+      financeGate: "pending",
+      paidAt: null,
+      bankRef: null,
+      createdAt: now,
+      updatedAt: now,
+      createdBy: actor.id,
+    };
+    this.store.expenses.set(expense.id, expense);
+    this.audit({
+      entity: "EXP",
+      entityId: expense.id,
+      fromStatus: null,
+      toStatus: "draft",
+      actorId: actor.id,
+      comment: `②-4 创建报销草稿，关联 ${pre.docNo}`,
+      skipped: false,
+    });
+    return clone(expense);
+  }
+
+  submitExpense(actorId: string, expenseId: string): ExpenseClaim {
+    const actor = this.requireUser(actorId);
+    const expense = this.expense(expenseId);
+    if (actor.id !== expense.applicantId) this.fail("FORBIDDEN_ROLE", "只有报销申请人可以提交", 403);
+    this.assertStatus(expense.status, "draft", "报销");
+    if (!expense.preApprovalId) {
+      this.fail("PRE_REQUIRED", "无事前申请不可提报销。require_pre_approval 固定为 true", 422);
+    }
+    const pre = this.store.pres.get(expense.preApprovalId);
+    if (!pre) this.fail("PRE_REQUIRED", "事前申请不存在，不可提交报销", 422);
+    if (pre.applicantId !== expense.applicantId) {
+      this.fail("PRE_NOT_APPROVED", "事前申请与报销申请人不一致", 409);
+    }
+    this.assertPreOpenForExpense(pre);
+    this.consumePre(pre, expense.id, actor);
+    expense.status = "submitted";
+    expense.updatedAt = this.now();
+    this.audit({
+      entity: "EXP",
+      entityId: expense.id,
+      fromStatus: "draft",
+      toStatus: "submitted",
+      actorId: actor.id,
+      comment: "②-4 提交报销，已占用事前申请",
+      skipped: false,
+    });
+    return clone(expense);
+  }
+
+  approveExpenseDept(actorId: string, expenseId: string, comment?: string): ExpenseClaim {
+    const actor = this.requireUser(actorId);
+    const expense = this.expense(expenseId);
+    this.assertStatus(expense.status, "submitted", "报销");
+    this.requireRole(actor, "dept");
+    if (actor.id === expense.applicantId) {
+      this.sod(actor, "EXP", expense.id, expense.status, "S3", "S3 报销申请人不得担任部门审批人");
+    }
+    expense.deptApproverId = actor.id;
+    expense.status = "dept_approved";
+    expense.updatedAt = this.now();
+    this.audit({
+      entity: "EXP",
+      entityId: expense.id,
+      fromStatus: "submitted",
+      toStatus: "dept_approved",
+      actorId: actor.id,
+      comment: this.note("②-5 部门审批通过", comment),
+      skipped: false,
+    });
+    return clone(expense);
+  }
+
+  rejectExpenseDept(actorId: string, expenseId: string, comment?: string): ExpenseClaim {
+    const actor = this.requireUser(actorId);
+    const expense = this.expense(expenseId);
+    this.assertStatus(expense.status, "submitted", "报销");
+    this.requireRole(actor, "dept");
+    if (actor.id === expense.applicantId) {
+      this.sod(actor, "EXP", expense.id, expense.status, "S3", "S3 报销申请人不得担任部门审批人");
+    }
+    expense.deptApproverId = actor.id;
+    expense.status = "rejected";
+    expense.updatedAt = this.now();
+    const pre = this.store.pres.get(expense.preApprovalId);
+    if (pre) this.releasePre(pre, actor, "报销被部门驳回，事前申请恢复为已批准");
+    this.audit({
+      entity: "EXP",
+      entityId: expense.id,
+      fromStatus: "submitted",
+      toStatus: "rejected",
+      actorId: actor.id,
+      comment: this.note("②-5 部门驳回", comment),
+      skipped: false,
+    });
+    return clone(expense);
+  }
+
+  cancelExpense(actorId: string, expenseId: string): ExpenseClaim {
+    const actor = this.requireUser(actorId);
+    const expense = this.expense(expenseId);
+    if (actor.id !== expense.applicantId) this.fail("FORBIDDEN_ROLE", "只有报销申请人可以取消", 403);
+    if (expense.status !== "draft" && expense.status !== "submitted") {
+      this.fail("INVALID_STATE", "当前报销不能取消", 409);
+    }
+    const from = expense.status;
+    expense.status = "cancelled";
+    expense.updatedAt = this.now();
+    if (from === "submitted") {
+      const pre = this.store.pres.get(expense.preApprovalId);
+      if (pre) this.releasePre(pre, actor, "报销取消，事前申请恢复为已批准");
+    }
+    this.audit({
+      entity: "EXP",
+      entityId: expense.id,
+      fromStatus: from,
+      toStatus: "cancelled",
+      actorId: actor.id,
+      comment: "申请人取消报销",
+      skipped: false,
+    });
+    return clone(expense);
+  }
+
+  checkExpenseTicket(actorId: string, expenseId: string): ExpenseClaim {
+    const actor = this.requireUser(actorId);
+    const expense = this.expense(expenseId);
+    this.assertStatus(expense.status, "dept_approved", "报销");
+    this.requireRole(actor, "finance");
+    const over = this.reimburseOver(expense.amount, expense.currency);
+    expense.ticketCheckerId = actor.id;
+    expense.status = "ticket_checked";
+    expense.updatedAt = this.now();
+    this.audit({
+      entity: "EXP",
+      entityId: expense.id,
+      fromStatus: "dept_approved",
+      toStatus: "ticket_checked",
+      actorId: actor.id,
+      comment: "②-6 财务审票通过。审票人记为记账人",
+      skipped: false,
+    });
+    if (!over) {
+      expense.financeGate = "skipped";
+      expense.status = "payment_approved";
+      this.audit({
+        entity: "EXP",
+        entityId: expense.id,
+        fromStatus: "ticket_checked",
+        toStatus: "payment_approved",
+        actorId: actor.id,
+        comment: "②-7 未超报销限额，跳过加签",
+        skipped: true,
+        skippedReason: "below_threshold",
+      });
+    } else {
+      expense.financeGate = "required";
+    }
+    return clone(expense);
+  }
+
+  cosignExpense(actorId: string, expenseId: string, comment?: string): ExpenseClaim {
+    const actor = this.requireUser(actorId);
+    const expense = this.expense(expenseId);
+    this.assertStatus(expense.status, "ticket_checked", "报销");
+    if (expense.financeGate !== "required") this.fail("INVALID_STATE", "当前报销不需要财务加签", 409);
+    this.requireRole(actor, "finance");
+    expense.financeCosignerId = actor.id;
+    expense.financeGate = "approved";
+    expense.status = "finance_cosigned";
+    expense.updatedAt = this.now();
+    this.audit({
+      entity: "EXP",
+      entityId: expense.id,
+      fromStatus: "ticket_checked",
+      toStatus: "finance_cosigned",
+      actorId: actor.id,
+      comment: this.note("②-7 报销超额，财务加签", comment),
+      skipped: false,
+    });
+    expense.status = "payment_approved";
+    this.audit({
+      entity: "EXP",
+      entityId: expense.id,
+      fromStatus: "finance_cosigned",
+      toStatus: "payment_approved",
+      actorId: actor.id,
+      comment: "加签完成，待出纳付款",
+      skipped: false,
+    });
+    return clone(expense);
+  }
+
+  payExpense(actorId: string, expenseId: string, bankRef: string): ExpenseClaim {
+    const actor = this.requireUser(actorId);
+    const expense = this.expense(expenseId);
+    this.requireRole(actor, "cashier");
+    this.assertStatus(expense.status, "payment_approved", "报销");
+    if (!expense.ticketCheckerId) this.fail("INVALID_STATE", "缺少审票人", 409);
+    if (actor.id === expense.ticketCheckerId) {
+      this.sod(actor, "EXP", expense.id, expense.status, "S2", "S2 报销审票人不得担任付款人（记账人 ≠ 付款人）");
+    }
+    const ref = this.requiredText(bankRef, "银行回单号");
+    if (ref.length > 64) this.fail("INVALID_BANK_REF", "银行回单号过长");
+    expense.payerId = actor.id;
+    expense.bankRef = ref;
+    expense.paidAt = this.now();
+    expense.status = "paid";
+    expense.updatedAt = expense.paidAt;
+    this.audit({
+      entity: "EXP",
+      entityId: expense.id,
+      fromStatus: "payment_approved",
+      toStatus: "paid",
+      actorId: actor.id,
+      comment: `②-8 出纳打款至员工账户 ${expense.employeeAccount}`,
+      skipped: false,
+    });
+    return clone(expense);
+  }
+
+  getPrepay(id: string): {
+    prepay: PrepayRequest;
+    settle: PrepaySettle | null;
+    refund: PrepayRefund | null;
+    chases: OverdueChase[];
+    reclaim: PrepayReclaim | null;
+  } {
     const prepay = this.prepay(id);
     return {
       prepay: clone(prepay),
       settle: clone(this.store.settleByPrepay(prepay.id) ?? null),
       refund: clone(this.store.refundByPrepay(prepay.id) ?? null),
+      chases: this.store.chasesByPrepay(prepay.id).map((row) => clone(row)),
+      reclaim: clone(this.store.reclaimByPrepay(prepay.id) ?? null),
     };
+  }
+
+  getPreApproval(id: string): PreApproval {
+    return clone(this.preApproval(id));
+  }
+
+  getExpense(id: string): ExpenseClaim {
+    return clone(this.expense(id));
   }
 
   getPr(id: string): PurchaseRequisition {
@@ -1595,6 +2258,10 @@ export class ProcurementService {
     prepays: PrepayRequest[];
     settles: PrepaySettle[];
     refunds: PrepayRefund[];
+    chases: OverdueChase[];
+    reclaims: PrepayReclaim[];
+    pres: PreApproval[];
+    expenses: ExpenseClaim[];
     assets: AssetCard[];
     audits: AuditLog[];
   } {
@@ -1609,6 +2276,10 @@ export class ProcurementService {
       prepays: [...this.store.prepays.values()].map((row) => clone(row)),
       settles: [...this.store.settles.values()].map((row) => clone(row)),
       refunds: [...this.store.refunds.values()].map((row) => clone(row)),
+      chases: [...this.store.chases.values()].map((row) => clone(row)),
+      reclaims: [...this.store.reclaims.values()].map((row) => clone(row)),
+      pres: [...this.store.pres.values()].map((row) => clone(row)),
+      expenses: [...this.store.expenses.values()].map((row) => clone(row)),
       assets: [...this.store.assets.values()].map((row) => clone(row)),
       audits: this.store.audits.map((row) => clone(row)),
     };
@@ -1628,6 +2299,180 @@ export class ProcurementService {
     const refund = this.store.refundByPrepay(prepayId);
     if (!refund) this.fail("NOT_FOUND", "溢付处理不存在", 404);
     return refund;
+  }
+
+  private reclaimOf(prepayId: string): PrepayReclaim {
+    const reclaim = this.store.reclaimByPrepay(prepayId);
+    if (!reclaim) this.fail("NOT_FOUND", "追索不存在", 404);
+    return reclaim;
+  }
+
+  private preApproval(id: string): PreApproval {
+    const row = this.store.pres.get(id);
+    if (!row) this.fail("NOT_FOUND", "事前申请不存在", 404);
+    return row;
+  }
+
+  private expense(id: string): ExpenseClaim {
+    const row = this.store.expenses.get(id);
+    if (!row) this.fail("NOT_FOUND", "报销单不存在", 404);
+    return row;
+  }
+
+  private collectOverdue(now: Date): { overdueDays: number; items: OverdueListItem[] } {
+    const overdueDays = this.prepayPolicy.overdueDays;
+    if (overdueDays == null) {
+      this.fail("THRESHOLD_NOT_CONFIGURED", "PREPAY_OVERDUE_DAYS 仍为占位符，未注入数值", 422);
+    }
+    const items: OverdueListItem[] = [];
+    for (const prepay of this.store.prepays.values()) {
+      if (!prepay.paidAt) continue;
+      if (!this.onOverdueWatch(prepay)) continue;
+      if (this.prepayAccepted(prepay)) continue;
+      const age = ageDays(prepay.paidAt, now);
+      const openException =
+        prepay.status === "overdue_flagged" || prepay.status === "chasing" || prepay.status === "reclaim_requested";
+      if (!openException && age < overdueDays) continue;
+      items.push({
+        prepayId: prepay.id,
+        docNo: prepay.docNo,
+        poId: prepay.poId,
+        companyCode: prepay.companyCode,
+        currency: prepay.currency,
+        amount: prepay.amount,
+        paidAt: prepay.paidAt,
+        ageDays: age,
+        overdueDays,
+        status: prepay.status,
+        flagged: prepay.overdueFlag,
+      });
+    }
+    items.sort((left, right) => left.docNo.localeCompare(right.docNo));
+    return { overdueDays, items };
+  }
+
+  private onOverdueWatch(prepay: PrepayRequest): boolean {
+    return (
+      prepay.status === "paid" ||
+      prepay.status === "accrued" ||
+      prepay.status === "awaiting_delivery" ||
+      prepay.status === "overdue_flagged" ||
+      prepay.status === "chasing" ||
+      prepay.status === "reclaim_requested"
+    );
+  }
+
+  private prepayAccepted(prepay: PrepayRequest): boolean {
+    const po = this.store.pos.get(prepay.poId);
+    if (!po) return false;
+    return this.confirmedGrns(po).length > 0;
+  }
+
+  private releaseOverdueOnArrival(po: PurchaseOrder, actor: User): void {
+    const prepay = this.livePrepay(po.id);
+    if (!prepay) return;
+    if (prepay.status !== "overdue_flagged" && prepay.status !== "chasing") return;
+    const from = prepay.status;
+    prepay.status = "awaiting_delivery";
+    prepay.overdueFlag = false;
+    prepay.updatedAt = this.now();
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: from,
+      toStatus: "awaiting_delivery",
+      actorId: actor.id,
+      comment: "到货，退出①-E 跟催，回到待核销",
+      skipped: false,
+    });
+  }
+
+  private chaseOutcome(raw: string): ChaseOutcome {
+    if (raw === "promised" || raw === "no_result") return raw;
+    this.fail("INVALID_INPUT", "跟催结果仅为 promised 或 no_result");
+  }
+
+  private isoDate(raw: string, label: string): string {
+    const text = this.requiredText(raw, label);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) this.fail("INVALID_DATE", `${label}须为 YYYY-MM-DD`);
+    const parsed = Date.parse(`${text}T00:00:00.000Z`);
+    if (Number.isNaN(parsed) || new Date(parsed).toISOString().slice(0, 10) !== text) {
+      this.fail("INVALID_DATE", `${label}不是有效日期`);
+    }
+    return text;
+  }
+
+  private assertPreOpenForExpense(pre: PreApproval): void {
+    if (pre.consumedByExpenseId || pre.status === "consumed_by_expense") {
+      this.fail("PRE_ALREADY_CONSUMED", "事前申请已被报销占用", 409);
+    }
+    if (pre.status !== "approved") {
+      this.fail("PRE_NOT_APPROVED", "报销必须关联已批准的事前申请", 409);
+    }
+  }
+
+  private consumePre(pre: PreApproval, expenseId: string, actor: User): void {
+    const from = pre.status;
+    pre.status = "consumed_by_expense";
+    pre.consumedByExpenseId = expenseId;
+    pre.updatedAt = this.now();
+    this.audit({
+      entity: "PRE",
+      entityId: pre.id,
+      fromStatus: from,
+      toStatus: "consumed_by_expense",
+      actorId: actor.id,
+      comment: `事前申请被报销 ${expenseId} 占用`,
+      skipped: false,
+    });
+  }
+
+  private releasePre(pre: PreApproval, actor: User, comment: string): void {
+    if (pre.status !== "consumed_by_expense") return;
+    pre.status = "approved";
+    pre.consumedByExpenseId = null;
+    pre.updatedAt = this.now();
+    this.audit({
+      entity: "PRE",
+      entityId: pre.id,
+      fromStatus: "consumed_by_expense",
+      toStatus: "approved",
+      actorId: actor.id,
+      comment,
+      skipped: false,
+    });
+  }
+
+  private reimburseOver(amount: string, currency: CurrencyCode): boolean {
+    const key = reimburseThresholdKey(currency);
+    const value = this.thresholds[key];
+    if (value == null) this.fail("THRESHOLD_NOT_CONFIGURED", `${key} 仍为占位符，未注入数值`, 422);
+    return compareAmount(amount, value) >= 0;
+  }
+
+  private invoiceNos(raw: unknown): string[] {
+    if (!Array.isArray(raw) || raw.length < 1 || raw.length > 20) {
+      this.fail("INVALID_INPUT", "报销至少 1 张、至多 20 张发票");
+    }
+    const nos = raw.map((item) => this.requiredText(typeof item === "string" ? item : "", "发票号码"));
+    if (new Set(nos).size !== nos.length) this.fail("DUPLICATE_INVOICE", "报销单内发票号码重复", 409);
+    return nos;
+  }
+
+  /** 路径①与路径②的发票查重仍待财务确认，这里只拒绝未关闭报销之间的重号。 */
+  private assertExpenseInvoicesFree(invoiceNos: string[]): void {
+    for (const expense of this.store.expenses.values()) {
+      if (expense.status === "rejected" || expense.status === "cancelled") continue;
+      if (expense.invoiceNos.some((no) => invoiceNos.includes(no))) {
+        this.fail("DUPLICATE_INVOICE", "发票号码已在其他报销单使用", 409);
+      }
+    }
+  }
+
+  private accountNo(raw: string): string {
+    const text = this.requiredText(raw, "员工收款账户");
+    if (text.length > 64) this.fail("INVALID_INPUT", "员工收款账户过长");
+    return text;
   }
 
   private addProforma(
@@ -1846,6 +2691,7 @@ export class ProcurementService {
       comment: po.status === "fully_received" ? `收齐。D4=${po.disposition}` : "部分收货",
       skipped: false,
     });
+    this.releaseOverdueOnArrival(po, actor);
   }
 
   private decideDisposition(po: PurchaseOrder): "asset" | "expense" {
@@ -1913,6 +2759,13 @@ export class ProcurementService {
   private assertReceivable(po: PurchaseOrder): void {
     if (po.status !== "awaiting_receipt" && po.status !== "partially_received") {
       this.fail("INVALID_STATE", "采购单当前不能收货", 409);
+    }
+    const prepay = this.livePrepay(po.id);
+    if (
+      prepay &&
+      (prepay.status === "reclaim_requested" || prepay.status === "reclaimed" || prepay.status === "disputed")
+    ) {
+      this.fail("PREPAY_RECLAIM_OPEN", "预付已进入追索或纠纷，不能再按到货验收", 409);
     }
   }
 
@@ -2039,6 +2892,20 @@ export class ProcurementService {
   private fail(code: string, message: string, status = 400): never {
     throw new DomainError(code, message, status);
   }
+}
+
+const DAY_MS = 86_400_000;
+
+function ageDays(paidAtIso: string, now: Date): number {
+  const paid = Date.parse(paidAtIso);
+  if (Number.isNaN(paid)) return 0;
+  const delta = now.getTime() - paid;
+  if (delta < 0) return 0;
+  return Math.floor(delta / DAY_MS);
+}
+
+function utcDay(now: Date): string {
+  return now.toISOString().slice(0, 10);
 }
 
 function formatStored(raw: string): string {

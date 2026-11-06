@@ -48,6 +48,31 @@ export type PrepayStatus =
   | "settled_equal"
   | "settled_with_balance"
   | "settled_with_refund"
+  | "overdue_flagged"
+  | "chasing"
+  | "reclaim_requested"
+  | "reclaimed"
+  | "disputed"
+  | "rejected"
+  | "cancelled";
+export type ChaseOutcome = "promised" | "no_result";
+export type ReclaimStatus = "requested" | "reclaimed" | "disputed";
+export type PreStatus =
+  | "draft"
+  | "submitted"
+  | "approved"
+  | "consumed_by_expense"
+  | "rejected"
+  | "cancelled"
+  | "expired";
+export type ExpenseStatus =
+  | "draft"
+  | "submitted"
+  | "dept_approved"
+  | "ticket_checked"
+  | "finance_cosigned"
+  | "payment_approved"
+  | "paid"
   | "rejected"
   | "cancelled";
 export type RefundMode = "refund" | "suspense";
@@ -279,6 +304,9 @@ export interface PrepayRequest {
   /** S5 预付付款人（①-P6）。 */
   payerId: string | null;
   bankRef: string | null;
+  paidAt: string | null;
+  overdueFlag: boolean;
+  promisedDeliveryDate: string | null;
   accrualBy: string | null;
   /** 本地预付挂账凭证号。不回写金蝶。 */
   accrualVoucherRef: string | null;
@@ -324,9 +352,108 @@ export interface PrepayRefund {
   updatedAt: string;
 }
 
+export interface OverdueListItem {
+  prepayId: string;
+  docNo: string;
+  poId: string;
+  companyCode: CompanyCode;
+  currency: CurrencyCode;
+  amount: string;
+  paidAt: string;
+  ageDays: number;
+  overdueDays: number;
+  status: PrepayStatus;
+  flagged: boolean;
+}
+
+export interface OverdueChase {
+  id: string;
+  docNo: string;
+  prepayId: string;
+  outcome: ChaseOutcome;
+  note: string;
+  promisedDeliveryDate: string | null;
+  actorId: string;
+  createdAt: string;
+}
+
+export interface PrepayReclaim {
+  id: string;
+  docNo: string;
+  prepayId: string;
+  amount: string;
+  status: ReclaimStatus;
+  requestedBy: string;
+  executorId: string | null;
+  bankRef: string | null;
+  /** ①-E3b 本地冲预付凭证号。不回写金蝶。 */
+  reversalVoucherRef: string | null;
+  disputeReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PreApproval {
+  id: string;
+  docNo: string;
+  companyCode: CompanyCode;
+  currency: CurrencyCode;
+  amount: string;
+  status: PreStatus;
+  applicantId: string;
+  deptId: string;
+  purpose: string;
+  deptApproverId: string | null;
+  consumedByExpenseId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+}
+
+export interface ExpenseClaim {
+  id: string;
+  docNo: string;
+  companyCode: CompanyCode;
+  currency: CurrencyCode;
+  amount: string;
+  status: ExpenseStatus;
+  applicantId: string;
+  deptId: string;
+  purpose: string;
+  /** Q5。提交时必须指向已批准 PRE。 */
+  preApprovalId: string;
+  invoiceNos: string[];
+  employeeAccount: string;
+  deptApproverId: string | null;
+  ticketCheckerId: string | null;
+  financeCosignerId: string | null;
+  payerId: string | null;
+  financeGate: Gate;
+  paidAt: string | null;
+  bankRef: string | null;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+}
+
 export interface AuditLog {
   id: string;
-  entity: "PR" | "PO" | "GRN" | "INV" | "MATCH" | "PAY" | "ASSET" | "USER" | "PREPAY" | "SETTLE" | "REFUND";
+  entity:
+    | "PR"
+    | "PO"
+    | "GRN"
+    | "INV"
+    | "MATCH"
+    | "PAY"
+    | "ASSET"
+    | "USER"
+    | "PREPAY"
+    | "SETTLE"
+    | "REFUND"
+    | "CHASE"
+    | "RECLAIM"
+    | "PRE"
+    | "EXP";
   entityId: string;
   fromStatus: string | null;
   toStatus: string | null;
