@@ -6,6 +6,9 @@ import type {
   InvoiceRegister,
   MatchSheet,
   Payment,
+  PrepayRefund,
+  PrepayRequest,
+  PrepaySettle,
   PurchaseOrder,
   PurchaseRequisition,
   QuoteCompare,
@@ -24,6 +27,9 @@ export class MemoryStore {
   readonly invoices = new Map<string, InvoiceRegister>();
   readonly matches = new Map<string, MatchSheet>();
   readonly payments = new Map<string, Payment>();
+  readonly prepays = new Map<string, PrepayRequest>();
+  readonly settles = new Map<string, PrepaySettle>();
+  readonly refunds = new Map<string, PrepayRefund>();
   readonly assets = new Map<string, AssetCard>();
   readonly vendors = new Map<string, Vendor>();
   readonly quotes = new Map<string, QuoteCompare>();
@@ -81,9 +87,10 @@ export class MemoryStore {
     return [...this.grns.values()].filter((row) => row.poId === poId);
   }
 
+  /** 正式进项票。形式发票不在这里返回。 */
   invoiceByPo(poId: string): InvoiceRegister | undefined {
     for (const invoice of this.invoices.values()) {
-      if (invoice.poId === poId) return invoice;
+      if (invoice.poId === poId && invoice.kind === "formal") return invoice;
     }
     return undefined;
   }
@@ -98,6 +105,28 @@ export class MemoryStore {
   paymentByPo(poId: string): Payment | undefined {
     for (const payment of this.payments.values()) {
       if (payment.poId === poId) return payment;
+    }
+    return undefined;
+  }
+
+  /** 未驳回、未取消的预付。一单 PO 同时只允许一张。 */
+  livePrepayByPo(poId: string): PrepayRequest | undefined {
+    for (const prepay of this.prepays.values()) {
+      if (prepay.poId === poId && prepay.status !== "rejected" && prepay.status !== "cancelled") return prepay;
+    }
+    return undefined;
+  }
+
+  settleByPrepay(prepayId: string): PrepaySettle | undefined {
+    for (const settle of this.settles.values()) {
+      if (settle.prepayId === prepayId) return settle;
+    }
+    return undefined;
+  }
+
+  refundByPrepay(prepayId: string): PrepayRefund | undefined {
+    for (const refund of this.refunds.values()) {
+      if (refund.prepayId === prepayId) return refund;
     }
     return undefined;
   }

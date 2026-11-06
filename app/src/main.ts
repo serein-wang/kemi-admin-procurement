@@ -9,6 +9,7 @@ const env = loadAppEnv();
 const app = Fastify({ logger: true, disableRequestLogging: true });
 await registerAdminProcurement(app, {
   thresholds: env.thresholds,
+  prepayPolicy: env.prepayPolicy,
   oidc: createKemiOidcClient(env.oidc),
   allowDevLogin: env.allowDevLogin,
   seedDemoUsers: env.seedDemoUsers,

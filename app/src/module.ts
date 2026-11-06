@@ -1,6 +1,7 @@
 import cookie from "@fastify/cookie";
 import type { FastifyInstance } from "fastify";
 import { DEMO_USERS } from "./auth/demo-users.js";
+import { emptyPrepayPolicy } from "./domain/thresholds.js";
 import type { ModuleHandle, ModuleOptions } from "./host.js";
 import { registerRoutes } from "./http/routes.js";
 import { ErpProInboundStub } from "./erp/inbound.js";
@@ -25,6 +26,7 @@ export async function registerAdminProcurement(
   const service = new ProcurementService({
     store,
     thresholds: options.thresholds,
+    prepayPolicy: options.prepayPolicy ?? emptyPrepayPolicy(),
     erp,
     clock: options.clock,
   });

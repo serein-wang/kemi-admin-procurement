@@ -5,9 +5,8 @@ import type { CurrencyCode } from "./thresholds.js";
 export type CompanyCode = "SZ" | "HK";
 export type { CurrencyCode, Role, AdminCategory };
 
-/** 阶段 1 只接受前两个。prepay 在入口直接拒绝。 */
-export type PaymentTermsInput = "after_delivery" | "monthly" | "prepay";
-export type Phase1PaymentTerms = "after_delivery" | "monthly";
+/** D6。prepay 走 ①-P*，到货后复用 ①-7 / ①-9 / ①-10。 */
+export type PaymentTerms = "after_delivery" | "monthly" | "prepay";
 
 export type PrStatus =
   | "draft"
@@ -23,6 +22,7 @@ export type PrStatus =
 
 export type PoStatus =
   | "issued"
+  | "awaiting_prepay"
   | "awaiting_receipt"
   | "partially_received"
   | "fully_received"
@@ -33,6 +33,25 @@ export type PoStatus =
   | "cancelled";
 
 export type Gate = "pending" | "required" | "skipped" | "approved";
+export type Dp2Result = "equal" | "short" | "over";
+export type PrepayStatus =
+  | "draft"
+  | "submitted"
+  | "dept_approved"
+  | "finance_cosigned"
+  | "ceo_approved"
+  | "finance_payment_approved"
+  | "paid"
+  | "accrued"
+  | "awaiting_delivery"
+  | "settling"
+  | "settled_equal"
+  | "settled_with_balance"
+  | "settled_with_refund"
+  | "rejected"
+  | "cancelled";
+export type RefundMode = "refund" | "suspense";
+export type RefundStatus = "requested" | "finance_approved" | "executed";
 export type ReserveStatus = "none" | "soft" | "hard" | "released";
 export type RfqWaiverKind = "below_threshold" | "low_value";
 
@@ -139,7 +158,7 @@ export interface PurchaseOrder {
   /** S1：下单人。 */
   issuerId: string;
   vendorId: string;
-  paymentTerms: Phase1PaymentTerms;
+  paymentTerms: PaymentTerms;
   paymentTermsDays: number | null;
   lines: PrLine[];
   /** D4。unset 表示尚未收齐。 */
@@ -172,7 +191,11 @@ export interface InvoiceRegister {
   id: string;
   docNo: string;
   invoiceNo: string;
-  invoiceType: "special" | "general";
+  /** special/general 为正式进项票。proforma 只能启动预付（Q13）。 */
+  invoiceType: "special" | "general" | "proforma";
+  kind: "formal" | "proforma";
+  /** 正式票替换形式票时保留关联。无形式票则为 null。 */
+  formalOf: string | null;
   amount: string;
   tax: string;
   poId: string;
@@ -186,6 +209,9 @@ export interface MatchSheet {
   poId: string;
   grnId: string;
   invoiceId: string;
+  prepayId: string | null;
+  /** 匹配时核对的已付预付额。非预付为 null。 */
+  prepayAmount: string | null;
   matchResult: "matched";
   /** 记账人，供 S2：voucher.creator ≠ payment.payer。 */
   matchedBy: string;
@@ -195,7 +221,7 @@ export interface MatchSheet {
 export interface Payment {
   id: string;
   docNo: string;
-  sourceType: "po_balance";
+  sourceType: "po_balance" | "prepay_tail";
   poId: string;
   matchId: string;
   companyCode: CompanyCode;
@@ -229,9 +255,78 @@ export interface AssetCard {
   createdAt: string;
 }
 
+export interface PrepayAttachment {
+  kind: "po" | "contract" | "proforma";
+  ref: string;
+}
+
+export interface PrepayRequest {
+  id: string;
+  docNo: string;
+  poId: string;
+  companyCode: CompanyCode;
+  currency: CurrencyCode;
+  amount: string;
+  /** 占 PO 的比例，提交时写入。 */
+  ratio: string | null;
+  status: PrepayStatus;
+  applicantId: string;
+  deptApproverId: string | null;
+  financeCosignerId: string | null;
+  ceoApproverId: string | null;
+  /** S5 预付审批人（①-P5），不是 ①-P3 加签人。 */
+  paymentApproverId: string | null;
+  /** S5 预付付款人（①-P6）。 */
+  payerId: string | null;
+  bankRef: string | null;
+  accrualBy: string | null;
+  /** 本地预付挂账凭证号。不回写金蝶。 */
+  accrualVoucherRef: string | null;
+  financeGate: Gate;
+  ceoGate: Gate;
+  /** Q10：金额等于 PO 且允许全额时为 true，D-P1 强制高额档。 */
+  fullPrepay: boolean;
+  attachments: PrepayAttachment[];
+  contractNo: string | null;
+  proformaInvoiceId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+}
+
+export interface PrepaySettle {
+  id: string;
+  docNo: string;
+  prepayId: string;
+  invoiceId: string;
+  matchId: string;
+  dp2Result: Dp2Result;
+  tailPayId: string | null;
+  refundId: string | null;
+  createdAt: string;
+  createdBy: string;
+}
+
+export interface PrepayRefund {
+  id: string;
+  docNo: string;
+  prepayId: string;
+  settleId: string;
+  mode: RefundMode;
+  amount: string;
+  status: RefundStatus;
+  requestedBy: string;
+  financeApproverId: string | null;
+  executorId: string | null;
+  reasonCode: string | null;
+  bankRef: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AuditLog {
   id: string;
-  entity: "PR" | "PO" | "GRN" | "INV" | "MATCH" | "PAY" | "ASSET" | "USER";
+  entity: "PR" | "PO" | "GRN" | "INV" | "MATCH" | "PAY" | "ASSET" | "USER" | "PREPAY" | "SETTLE" | "REFUND";
   entityId: string;
   fromStatus: string | null;
   toStatus: string | null;
@@ -240,7 +335,7 @@ export interface AuditLog {
   comment: string;
   skipped: boolean;
   skippedReason?: string;
-  sodViolationCode?: "S1" | "S2" | "S3";
+  sodViolationCode?: "S1" | "S2" | "S3" | "S5";
 }
 
 export interface CreatePrInput {
