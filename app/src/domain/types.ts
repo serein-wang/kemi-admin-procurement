@@ -165,6 +165,8 @@ export interface PurchaseRequisition {
   rfqWaiverKind: RfqWaiverKind | null;
   rfqWaived: boolean;
   waiveReason: string | null;
+  /** 最近一次驳回理由。重新提交后清空。 */
+  rejectReason: string | null;
   /** 行全部为 low_value 时为低值易耗单据（Q7）。 */
   docType: PrDocType;
   procurementClass: "admin_non_production";
@@ -371,6 +373,8 @@ export interface PrepayRequest {
   attachments: PrepayAttachment[];
   contractNo: string | null;
   proformaInvoiceId: string | null;
+  /** 最近一次驳回理由。重新提交后清空。 */
+  rejectReason: string | null;
   createdAt: string;
   updatedAt: string;
   createdBy: string;
@@ -459,6 +463,8 @@ export interface PreApproval {
   purpose: string;
   deptApproverId: string | null;
   consumedByExpenseId: string | null;
+  /** 最近一次驳回理由。重新提交后清空。 */
+  rejectReason: string | null;
   createdAt: string;
   updatedAt: string;
   createdBy: string;
@@ -485,6 +491,8 @@ export interface ExpenseClaim {
   financeGate: Gate;
   paidAt: string | null;
   bankRef: string | null;
+  /** 最近一次驳回理由。重新提交后清空。 */
+  rejectReason: string | null;
   createdAt: string;
   updatedAt: string;
   createdBy: string;
@@ -518,6 +526,21 @@ export interface AuditLog {
   skipped: boolean;
   skippedReason?: string;
   sodViolationCode?: "S1" | "S2" | "S3" | "S4" | "S5";
+}
+
+/** 当前用户的待办。驳回后单据进入申请人队列，不再留在驳回人的审批队列。 */
+export interface TodoItem {
+  entity: "PR" | "PREPAY" | "PRE" | "EXP";
+  id: string;
+  docNo: string;
+  status: string;
+  applicantId: string;
+  title: string;
+  amount: string;
+  currency: CurrencyCode;
+  rejectReason: string | null;
+  /** applicant：申请人处理；dept / finance / ceo：待该角色审批。 */
+  queue: "applicant" | "dept" | "finance" | "ceo";
 }
 
 export interface CreatePrInput {

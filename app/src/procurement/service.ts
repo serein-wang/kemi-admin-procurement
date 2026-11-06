@@ -54,6 +54,7 @@ import type {
   PurchaseOrder,
   PurchaseRequisition,
   QuoteInput,
+  TodoItem,
   User,
 } from "../domain/types.js";
 import type { ErpProInboundPort } from "../erp/inbound.js";
@@ -241,6 +242,7 @@ export class ProcurementService {
       rfqWaiverKind: null,
       rfqWaived: false,
       waiveReason: null,
+      rejectReason: null,
       docType,
       procurementClass: "admin_non_production",
       lines,
@@ -265,7 +267,8 @@ export class ProcurementService {
     const actor = this.requireUser(actorId);
     const pr = this.pr(prId);
     this.assertApplicant(actor, pr);
-    this.assertStatus(pr.status, "draft", "请购");
+    const from = pr.status;
+    this.assertDraftOrRejected(from, "请购");
     this.openHold(actor, {
       budgetId: pr.budgetId,
       companyCode: pr.companyCode,
@@ -276,16 +279,18 @@ export class ProcurementService {
       sourceId: pr.id,
       linkedPrId: pr.id,
     });
+    if (from === "rejected") this.clearPrApproval(pr);
+    pr.rejectReason = null;
     pr.status = "submitted";
     pr.reserveStatus = "soft";
     pr.updatedAt = this.now();
     this.audit({
       entity: "PR",
       entityId: pr.id,
-      fromStatus: "draft",
+      fromStatus: from,
       toStatus: "submitted",
       actorId: actor.id,
-      comment: "①-1 提交请购；Q8 软占用",
+      comment: from === "rejected" ? "①-1 驳回后重新提交；Q8 软占用" : "①-1 提交请购；Q8 软占用",
       skipped: false,
     });
     return clone(pr);
@@ -367,8 +372,10 @@ export class ProcurementService {
     if (actor.id === pr.applicantId) {
       this.sod(actor, "PR", pr.id, pr.status, "S3", "S3 申请人不得担任部门审批人");
     }
+    const reason = this.rejectReasonText(comment);
     this.releaseSoft(actor, pr, "pr_rejected");
     pr.status = "rejected";
+    pr.rejectReason = reason;
     pr.deptApproverId = actor.id;
     pr.updatedAt = this.now();
     this.audit({
@@ -377,7 +384,7 @@ export class ProcurementService {
       fromStatus: "submitted",
       toStatus: "rejected",
       actorId: actor.id,
-      comment: this.note("①-2 部门驳回；释放软占用", comment),
+      comment: this.note("①-2 部门驳回；释放软占用", reason),
       skipped: false,
     });
     return clone(pr);
@@ -389,8 +396,10 @@ export class ProcurementService {
     this.assertStatus(pr.status, "dept_approved", "请购");
     if (pr.financeGate !== "required") this.fail("INVALID_STATE", "当前请购不需要财务加签", 409);
     this.requireRole(actor, "finance");
+    const reason = this.rejectReasonText(comment);
     this.releaseSoft(actor, pr, "pr_rejected");
     pr.status = "rejected";
+    pr.rejectReason = reason;
     pr.financeApproverId = actor.id;
     pr.updatedAt = this.now();
     this.audit({
@@ -399,7 +408,7 @@ export class ProcurementService {
       fromStatus: "dept_approved",
       toStatus: "rejected",
       actorId: actor.id,
-      comment: this.note("①-3 财务驳回；释放软占用", comment),
+      comment: this.note("①-3 财务驳回；释放软占用", reason),
       skipped: false,
     });
     return clone(pr);
@@ -411,8 +420,10 @@ export class ProcurementService {
     this.assertStatus(pr.status, "finance_approved", "请购");
     if (pr.ceoGate !== "required") this.fail("INVALID_STATE", "当前请购不需要总经理审批", 409);
     this.requireRole(actor, "ceo");
+    const reason = this.rejectReasonText(comment);
     this.releaseSoft(actor, pr, "pr_rejected");
     pr.status = "rejected";
+    pr.rejectReason = reason;
     pr.ceoApproverId = actor.id;
     pr.updatedAt = this.now();
     this.audit({
@@ -421,7 +432,7 @@ export class ProcurementService {
       fromStatus: "finance_approved",
       toStatus: "rejected",
       actorId: actor.id,
-      comment: this.note("①-4 总经理驳回；释放软占用", comment),
+      comment: this.note("①-4 总经理驳回；释放软占用", reason),
       skipped: false,
     });
     return clone(pr);
@@ -1365,6 +1376,7 @@ export class ProcurementService {
       attachments,
       contractNo,
       proformaInvoiceId,
+      rejectReason: null,
       createdAt: now,
       updatedAt: now,
       createdBy: actor.id,
@@ -1387,7 +1399,8 @@ export class ProcurementService {
     const prepay = this.prepay(prepayId);
     const po = this.po(prepay.poId);
     if (actor.id !== prepay.applicantId) this.fail("FORBIDDEN_ROLE", "只有预付申请人可以提交", 403);
-    this.assertStatus(prepay.status, "draft", "预付");
+    const from = prepay.status;
+    this.assertDraftOrRejected(from, "预付");
     const contractLine = this.readPrepayMoney(po.currency, "contract");
     if (compareAmount(prepay.amount, contractLine) >= 0 && !prepay.contractNo) {
       this.fail("CONTRACT_REQUIRED", "预付额已达合同阈值，必须附合同", 422);
@@ -1408,15 +1421,25 @@ export class ProcurementService {
     }
     prepay.fullPrepay = full;
     prepay.ratio = formatRatio(prepay.amount, po.amount);
+    if (from === "rejected") {
+      prepay.deptApproverId = null;
+      prepay.financeCosignerId = null;
+      prepay.ceoApproverId = null;
+      prepay.financeGate = "pending";
+      prepay.ceoGate = "pending";
+    }
+    prepay.rejectReason = null;
     prepay.status = "submitted";
     prepay.updatedAt = this.now();
     this.audit({
       entity: "PREPAY",
       entityId: prepay.id,
-      fromStatus: "draft",
+      fromStatus: from,
       toStatus: "submitted",
       actorId: actor.id,
-      comment: full ? "①-P1 提交全额预付" : "①-P1 提交预付申请",
+      comment: from === "rejected"
+        ? "①-P1 驳回后重新提交"
+        : full ? "①-P1 提交全额预付" : "①-P1 提交预付申请",
       skipped: false,
     });
     return clone(prepay);
@@ -1455,7 +1478,9 @@ export class ProcurementService {
     if (actor.id === prepay.applicantId) {
       this.sod(actor, "PREPAY", prepay.id, prepay.status, "S3", "S3 预付申请人不得担任部门审批人");
     }
+    const reason = this.rejectReasonText(comment);
     prepay.deptApproverId = actor.id;
+    prepay.rejectReason = reason;
     prepay.status = "rejected";
     prepay.updatedAt = this.now();
     this.audit({
@@ -1464,7 +1489,7 @@ export class ProcurementService {
       fromStatus: "submitted",
       toStatus: "rejected",
       actorId: actor.id,
-      comment: this.note("①-P2 部门驳回", comment),
+      comment: this.note("①-P2 部门驳回", reason),
       skipped: false,
     });
     return clone(prepay);
@@ -2096,6 +2121,7 @@ export class ProcurementService {
       purpose,
       deptApproverId: null,
       consumedByExpenseId: null,
+      rejectReason: null,
       createdAt: now,
       updatedAt: now,
       createdBy: actor.id,
@@ -2117,16 +2143,19 @@ export class ProcurementService {
     const actor = this.requireUser(actorId);
     const pre = this.preApproval(preId);
     if (actor.id !== pre.applicantId) this.fail("FORBIDDEN_ROLE", "只有事前申请人可以提交", 403);
-    this.assertStatus(pre.status, "draft", "事前申请");
+    const from = pre.status;
+    this.assertDraftOrRejected(from, "事前申请");
+    if (from === "rejected") pre.deptApproverId = null;
+    pre.rejectReason = null;
     pre.status = "submitted";
     pre.updatedAt = this.now();
     this.audit({
       entity: "PRE",
       entityId: pre.id,
-      fromStatus: "draft",
+      fromStatus: from,
       toStatus: "submitted",
       actorId: actor.id,
-      comment: "②-1 提交事前申请",
+      comment: from === "rejected" ? "②-1 驳回后重新提交" : "②-1 提交事前申请",
       skipped: false,
     });
     return clone(pre);
@@ -2163,7 +2192,9 @@ export class ProcurementService {
     if (actor.id === pre.applicantId) {
       this.sod(actor, "PRE", pre.id, pre.status, "S3", "S3 事前申请人不得担任部门审批人");
     }
+    const reason = this.rejectReasonText(comment);
     pre.deptApproverId = actor.id;
+    pre.rejectReason = reason;
     pre.status = "rejected";
     pre.updatedAt = this.now();
     this.audit({
@@ -2172,7 +2203,7 @@ export class ProcurementService {
       fromStatus: "submitted",
       toStatus: "rejected",
       actorId: actor.id,
-      comment: this.note("②-2 事前驳回", comment),
+      comment: this.note("②-2 事前驳回", reason),
       skipped: false,
     });
     return clone(pre);
@@ -2249,6 +2280,7 @@ export class ProcurementService {
       financeGate: "pending",
       paidAt: null,
       bankRef: null,
+      rejectReason: null,
       createdAt: now,
       updatedAt: now,
       createdBy: actor.id,
@@ -2270,7 +2302,8 @@ export class ProcurementService {
     const actor = this.requireUser(actorId);
     const expense = this.expense(expenseId);
     if (actor.id !== expense.applicantId) this.fail("FORBIDDEN_ROLE", "只有报销申请人可以提交", 403);
-    this.assertStatus(expense.status, "draft", "报销");
+    const from = expense.status;
+    this.assertDraftOrRejected(from, "报销");
     if (!expense.preApprovalId) {
       this.fail("PRE_REQUIRED", "无事前申请不可提报销。require_pre_approval 固定为 true", 422);
     }
@@ -2281,15 +2314,17 @@ export class ProcurementService {
     }
     this.assertPreOpenForExpense(pre);
     this.consumePre(pre, expense.id, actor);
+    if (from === "rejected") expense.deptApproverId = null;
+    expense.rejectReason = null;
     expense.status = "submitted";
     expense.updatedAt = this.now();
     this.audit({
       entity: "EXP",
       entityId: expense.id,
-      fromStatus: "draft",
+      fromStatus: from,
       toStatus: "submitted",
       actorId: actor.id,
-      comment: "②-4 提交报销，已占用事前申请",
+      comment: from === "rejected" ? "②-4 驳回后重新提交，已占用事前申请" : "②-4 提交报销，已占用事前申请",
       skipped: false,
     });
     return clone(expense);
@@ -2326,7 +2361,9 @@ export class ProcurementService {
     if (actor.id === expense.applicantId) {
       this.sod(actor, "EXP", expense.id, expense.status, "S3", "S3 报销申请人不得担任部门审批人");
     }
+    const reason = this.rejectReasonText(comment);
     expense.deptApproverId = actor.id;
+    expense.rejectReason = reason;
     expense.status = "rejected";
     expense.updatedAt = this.now();
     const pre = this.store.pres.get(expense.preApprovalId);
@@ -2337,7 +2374,7 @@ export class ProcurementService {
       fromStatus: "submitted",
       toStatus: "rejected",
       actorId: actor.id,
-      comment: this.note("②-5 部门驳回", comment),
+      comment: this.note("②-5 部门驳回", reason),
       skipped: false,
     });
     return clone(expense);
@@ -2509,6 +2546,47 @@ export class ProcurementService {
 
   getPayment(id: string): Payment {
     return clone(this.payment(id));
+  }
+
+  /** 当前用户待办。驳回单只出现在申请人队列。 */
+  listTodos(userId: string): TodoItem[] {
+    const actor = this.requireUser(userId);
+    const roles = new Set(this.store.rolesOf(actor.id));
+    const items: TodoItem[] = [];
+    for (const pr of this.store.prs.values()) {
+      if (pr.applicantId === actor.id && (pr.status === "draft" || pr.status === "rejected")) {
+        items.push(this.todoItem("PR", pr, pr.purpose, "applicant"));
+      } else if (roles.has("dept") && pr.status === "submitted" && pr.applicantId !== actor.id) {
+        items.push(this.todoItem("PR", pr, pr.purpose, "dept"));
+      } else if (roles.has("finance") && pr.status === "dept_approved" && pr.financeGate === "required") {
+        items.push(this.todoItem("PR", pr, pr.purpose, "finance"));
+      } else if (roles.has("ceo") && pr.status === "finance_approved" && pr.ceoGate === "required") {
+        items.push(this.todoItem("PR", pr, pr.purpose, "ceo"));
+      }
+    }
+    for (const prepay of this.store.prepays.values()) {
+      if (prepay.applicantId === actor.id && (prepay.status === "draft" || prepay.status === "rejected")) {
+        items.push(this.todoItem("PREPAY", prepay, "预付申请", "applicant"));
+      } else if (roles.has("dept") && prepay.status === "submitted" && prepay.applicantId !== actor.id) {
+        items.push(this.todoItem("PREPAY", prepay, "预付申请", "dept"));
+      }
+    }
+    for (const pre of this.store.pres.values()) {
+      if (pre.applicantId === actor.id && (pre.status === "draft" || pre.status === "rejected")) {
+        items.push(this.todoItem("PRE", pre, pre.purpose, "applicant"));
+      } else if (roles.has("dept") && pre.status === "submitted" && pre.applicantId !== actor.id) {
+        items.push(this.todoItem("PRE", pre, pre.purpose, "dept"));
+      }
+    }
+    for (const expense of this.store.expenses.values()) {
+      if (expense.applicantId === actor.id && (expense.status === "draft" || expense.status === "rejected")) {
+        items.push(this.todoItem("EXP", expense, expense.purpose, "applicant"));
+      } else if (roles.has("dept") && expense.status === "submitted" && expense.applicantId !== actor.id) {
+        items.push(this.todoItem("EXP", expense, expense.purpose, "dept"));
+      }
+    }
+    items.sort((left, right) => left.docNo.localeCompare(right.docNo) || left.entity.localeCompare(right.entity));
+    return items;
   }
 
   listAudit(filter: { entity?: string; entityId?: string }): AuditLog[] {
@@ -3100,6 +3178,56 @@ export class ProcurementService {
 
   private assertStatus(actual: string, expected: string, label: string): void {
     if (actual !== expected) this.fail("INVALID_STATE", `${label}状态是 ${actual}，不能从该状态执行此操作`, 409);
+  }
+
+  private assertDraftOrRejected(actual: string, label: string): void {
+    if (actual !== "draft" && actual !== "rejected") {
+      this.fail("INVALID_STATE", `${label}状态是 ${actual}，不能从该状态执行此操作`, 409);
+    }
+  }
+
+  /** 驳回后重新提交时清掉上一轮审批人，矩阵从头再走。 */
+  private clearPrApproval(pr: PurchaseRequisition): void {
+    pr.deptApproverId = null;
+    pr.financeApproverId = null;
+    pr.ceoApproverId = null;
+    pr.financeGate = "pending";
+    pr.ceoGate = "pending";
+  }
+
+  private rejectReasonText(raw: string | undefined): string {
+    const text = (raw ?? "").trim();
+    if (!text) this.fail("REJECT_REASON_REQUIRED", "驳回必须填写驳回理由");
+    if (text.length > 200) this.fail("INVALID_INPUT", "驳回理由过长");
+    return text;
+  }
+
+  private todoItem(
+    entity: TodoItem["entity"],
+    row: {
+      id: string;
+      docNo: string;
+      status: string;
+      applicantId: string;
+      amount: string;
+      currency: CurrencyCode;
+      rejectReason: string | null;
+    },
+    title: string,
+    queue: TodoItem["queue"],
+  ): TodoItem {
+    return {
+      entity,
+      id: row.id,
+      docNo: row.docNo,
+      status: row.status,
+      applicantId: row.applicantId,
+      title,
+      amount: row.amount,
+      currency: row.currency,
+      rejectReason: row.rejectReason,
+      queue,
+    };
   }
 
   private requireRole(user: User, role: Role): void {

@@ -164,6 +164,7 @@
     }
     button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
     button.danger:hover { background: var(--danger-hover); border-color: var(--danger-hover); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
     .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; align-items: center; }
     .row input, .row select { width: auto; min-width: 128px; max-width: 240px; flex: 1 1 140px; }
     .hint { margin: 12px 0 0; color: var(--muted); font-size: 12px; }
@@ -213,6 +214,33 @@
     }
     .doc strong { display: block; color: var(--ink); font-size: 14px; font-weight: 600; }
     .meta { color: var(--muted); font-size: 13px; margin-top: 4px; overflow-wrap: anywhere; }
+    .reject-reason {
+      margin-top: 8px;
+      padding: 8px 10px;
+      background: #fef0f0;
+      border: 1px solid #fde2e2;
+      border-radius: var(--radius);
+      color: #c45656;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      display: grid;
+      place-items: center;
+      padding: 16px;
+      background: rgba(36, 59, 87, 0.35);
+    }
+    .modal {
+      width: min(440px, 100%);
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-card);
+      padding: 14px;
+    }
+    .modal h3 { margin: 0; font-size: 15px; font-weight: 600; color: var(--ink); }
     #audits { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; border: 1px solid #ebeef5; }
     th, td { text-align: left; border-bottom: 1px solid #ebeef5; padding: 8px 10px; vertical-align: top; }
@@ -409,6 +437,10 @@
     <section>
       <div id="notice"></div>
       <div class="card">
+        <h2>待办事项</h2>
+        <div id="todos" class="meta">登录并选择路径后显示你的待办。</div>
+      </div>
+      <div class="card">
         <h2>单据</h2>
         <div id="docs" class="meta">选择路径后显示该路径的单据。</div>
       </div>
@@ -420,16 +452,38 @@
     </div>
     </div>
   </main>
+  <div id="reject-modal" class="modal-backdrop" hidden>
+    <form id="reject-form" class="modal" role="dialog" aria-modal="true" aria-labelledby="reject-title">
+      <h3 id="reject-title">驳回理由</h3>
+      <p class="hint">驳回必须填写理由。确认后单据回到申请人的待办。</p>
+      <label for="reject-reason">驳回理由</label>
+      <textarea id="reject-reason" name="reason" maxlength="200" required placeholder="请填写驳回理由"></textarea>
+      <div class="row">
+        <button type="submit" id="reject-confirm" disabled>确认驳回</button>
+        <button type="button" id="reject-cancel" class="ghost">取消</button>
+      </div>
+    </form>
+  </div>
   <script>
     const PREFIX = "__PREFIX__";
     const sessionEl = document.querySelector("#session");
     const docsEl = document.querySelector("#docs");
+    const todosEl = document.querySelector("#todos");
     const auditsEl = document.querySelector("#audits");
     const noticeEl = document.querySelector("#notice");
     const logoutBtn = document.querySelector("#logout");
     let me = null;
     let workspace = null;
+    let todos = [];
     let selectedPath = null;
+    const REJECT_URL = {
+      "dept-reject": (id) => "/api/pr/" + id + "/dept-reject",
+      "finance-reject": (id) => "/api/pr/" + id + "/finance-reject",
+      "ceo-reject": (id) => "/api/pr/" + id + "/ceo-reject",
+      "prepay-dept-reject": (id) => "/api/prepay/" + id + "/dept-reject",
+      "pre-dept-reject": (id) => "/api/pre/" + id + "/dept-reject",
+      "exp-dept-reject": (id) => "/api/exp/" + id + "/dept-reject",
+    };
     try {
       const storedPath = sessionStorage.getItem("ap-path");
       if (storedPath === "company" || storedPath === "reimburse") selectedPath = storedPath;
@@ -507,7 +561,58 @@
       return el;
     }
 
+    function appendRejectReason(parent, doc) {
+      const reason = doc && typeof doc.rejectReason === "string" ? doc.rejectReason.trim() : "";
+      if (!reason) return;
+      const box = document.createElement("div");
+      box.className = "reject-reason";
+      box.textContent = "驳回理由：" + reason;
+      parent.append(box);
+    }
+
+    function renderTodos() {
+      todosEl.innerHTML = "";
+      if (!me || !selectedPath) {
+        todosEl.textContent = "登录并选择路径后显示你的待办。";
+        return;
+      }
+      const allowed = selectedPath === "company" ? ["PR", "PREPAY"] : ["PRE", "EXP"];
+      const rows = (todos || []).filter((row) => allowed.includes(row.entity));
+      if (!rows.length) {
+        todosEl.textContent = "没有待办。";
+        return;
+      }
+      const kindName = { PR: "请购", PREPAY: "预付", PRE: "事前", EXP: "报销" };
+      const wrap = document.createElement("div");
+      for (const row of rows) {
+        const block = document.createElement("div");
+        block.className = "doc";
+        block.dataset.todo = row.id;
+        const title = document.createElement("strong");
+        title.textContent = row.docNo + " · " + row.title + " · " + row.amount + " " + row.currency;
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = (kindName[row.entity] || row.entity) + " " + row.status
+          + (row.queue === "applicant" ? " · 待你处理" : " · 待你审批");
+        block.append(title, meta);
+        appendRejectReason(block, row);
+        const actions = document.createElement("div");
+        actions.className = "row";
+        if (row.queue === "applicant" && me.id === row.applicantId && (row.status === "draft" || row.status === "rejected")) {
+          const again = row.status === "rejected";
+          if (row.entity === "PR") actions.append(button(again ? "重新提交" : "提交", "submit", row.id));
+          if (row.entity === "PREPAY") actions.append(button(again ? "重新提交" : "提交预付", "prepay-submit", row.id));
+          if (row.entity === "PRE") actions.append(button(again ? "重新提交" : "提交事前", "pre-submit", row.id));
+          if (row.entity === "EXP") actions.append(button(again ? "重新提交" : "提交报销", "exp-submit", row.id));
+        }
+        if (actions.childElementCount) block.append(actions);
+        wrap.append(block);
+      }
+      todosEl.append(wrap);
+    }
+
     function renderDocs() {
+      renderTodos();
       docsEl.innerHTML = "";
       if (!workspace) {
         docsEl.textContent = "选择路径后显示该路径的单据。";
@@ -537,7 +642,9 @@
         const lineDetail = prLineDetail(pr.lines);
         const actions = document.createElement("div");
         actions.className = "row";
-        if (pr.status === "draft" && me && me.id === pr.applicantId) actions.append(button("提交", "submit", pr.id));
+        if ((pr.status === "draft" || pr.status === "rejected") && me && me.id === pr.applicantId) {
+          actions.append(button(pr.status === "rejected" ? "重新提交" : "提交", "submit", pr.id));
+        }
         if (["draft", "submitted", "dept_approved", "finance_approved", "ceo_approved", "sourcing", "ready_for_po"].includes(pr.status) && me && me.id === pr.applicantId) {
           actions.append(button("取消请购", "pr-cancel", pr.id, "danger"));
         }
@@ -577,6 +684,7 @@
           actions.append(terms, vendor, button("下采购单", "issue", pr.id));
         }
         block.append(title, meta);
+        appendRejectReason(block, pr);
         if (lineDetail) {
           const detail = document.createElement("div");
           detail.className = "meta";
@@ -729,7 +837,9 @@
           + (refund ? " · 溢付 " + refund.mode + " " + refund.status : "");
         const actions = document.createElement("div");
         actions.className = "row";
-        if (prepay.status === "draft" && me && me.id === prepay.applicantId) actions.append(button("提交预付", "prepay-submit", prepay.id));
+        if ((prepay.status === "draft" || prepay.status === "rejected") && me && me.id === prepay.applicantId) {
+          actions.append(button(prepay.status === "rejected" ? "重新提交" : "提交预付", "prepay-submit", prepay.id));
+        }
         if (prepay.status === "submitted" && hasRole("dept")) {
           actions.append(button("部门通过", "prepay-dept", prepay.id));
           actions.append(button("驳回", "prepay-dept-reject", prepay.id, "danger"));
@@ -829,7 +939,9 @@
           reason.dataset.id = prepay.id;
           actions.append(reason, button("挂纠纷", "prepay-reclaim-dispute", prepay.id));
         }
-        block.append(title, meta, actions);
+        block.append(title, meta);
+        appendRejectReason(block, prepay);
+        block.append(actions);
         wrap.append(block);
       }
       for (const pay of selectedPath === "company" ? workspace.payments : []) {
@@ -865,7 +977,9 @@
         meta.textContent = "事前 " + pre.status + (pre.consumedByExpenseId ? " · 占用 " + pre.consumedByExpenseId : "");
         const actions = document.createElement("div");
         actions.className = "row";
-        if (pre.status === "draft" && me && me.id === pre.applicantId) actions.append(button("提交事前", "pre-submit", pre.id));
+        if ((pre.status === "draft" || pre.status === "rejected") && me && me.id === pre.applicantId) {
+          actions.append(button(pre.status === "rejected" ? "重新提交" : "提交事前", "pre-submit", pre.id));
+        }
         if (pre.status === "submitted" && hasRole("dept")) {
           actions.append(button("事前通过", "pre-dept", pre.id));
           actions.append(button("驳回", "pre-dept-reject", pre.id, "danger"));
@@ -891,7 +1005,9 @@
           account.dataset.id = pre.id;
           actions.append(amount, invoice, account, button("提报销草稿", "exp-create", pre.id));
         }
-        block.append(title, meta, actions);
+        block.append(title, meta);
+        appendRejectReason(block, pre);
+        block.append(actions);
         wrap.append(block);
       }
       for (const expense of selectedPath === "reimburse" ? (workspace.expenses || []) : []) {
@@ -907,7 +1023,9 @@
           + " · 发票 " + (expense.invoiceNos || []).join(",");
         const actions = document.createElement("div");
         actions.className = "row";
-        if (expense.status === "draft" && me && me.id === expense.applicantId) actions.append(button("提交报销", "exp-submit", expense.id));
+        if ((expense.status === "draft" || expense.status === "rejected") && me && me.id === expense.applicantId) {
+          actions.append(button(expense.status === "rejected" ? "重新提交" : "提交报销", "exp-submit", expense.id));
+        }
         if (expense.status === "submitted" && hasRole("dept")) {
           actions.append(button("部门通过", "exp-dept", expense.id));
           actions.append(button("驳回", "exp-dept-reject", expense.id, "danger"));
@@ -924,7 +1042,9 @@
           bank.dataset.id = expense.id;
           actions.append(bank, button("打款给员工", "exp-pay", expense.id));
         }
-        block.append(title, meta, actions);
+        block.append(title, meta);
+        appendRejectReason(block, expense);
+        block.append(actions);
         wrap.append(block);
       }
       if (!wrap.childElementCount) {
@@ -1034,9 +1154,11 @@
         sessionEl.textContent = me.displayName + " · " + me.ucUserId + " · " + (me.roles.join(" / ") || "无角色") + " · " + me.status;
         logoutBtn.hidden = false;
         workspace = await api("/api/workspace");
+        todos = (await api("/api/todos")).todos || [];
       } catch (error) {
         me = null;
         workspace = null;
+        todos = [];
         sessionEl.textContent = "未登录";
         logoutBtn.hidden = true;
       }
@@ -1267,15 +1389,65 @@
       }
     });
 
+    const rejectModal = document.querySelector("#reject-modal");
+    const rejectReasonEl = document.querySelector("#reject-reason");
+    const rejectConfirm = document.querySelector("#reject-confirm");
+    let pendingRejectUrl = "";
+
+    function syncRejectConfirm() {
+      rejectConfirm.disabled = rejectReasonEl.value.trim().length === 0;
+    }
+
+    function openReject(url) {
+      pendingRejectUrl = url;
+      rejectReasonEl.value = "";
+      syncRejectConfirm();
+      rejectModal.hidden = false;
+      rejectReasonEl.focus();
+    }
+
+    function closeReject() {
+      pendingRejectUrl = "";
+      rejectModal.hidden = true;
+    }
+
+    rejectReasonEl.addEventListener("input", syncRejectConfirm);
+    document.querySelector("#reject-cancel").addEventListener("click", closeReject);
+    rejectModal.addEventListener("click", (event) => {
+      if (event.target === rejectModal) closeReject();
+    });
+    document.querySelector("#reject-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const reason = rejectReasonEl.value.trim();
+      if (!reason || !pendingRejectUrl) {
+        syncRejectConfirm();
+        notice("error", "请填写驳回理由");
+        return;
+      }
+      const url = pendingRejectUrl;
+      closeReject();
+      try {
+        await api(url, { method: "POST", body: JSON.stringify({ reason }) });
+        notice("ok", "已驳回，单据回到申请人待办");
+        await refresh();
+      } catch (error) {
+        notice("error", error.message);
+        await refresh();
+      }
+    });
+
     document.body.addEventListener("click", async (event) => {
       const target = event.target.closest("[data-act]");
       if (!target) return;
       const id = target.dataset.id;
       const act = target.dataset.act;
+      if (REJECT_URL[act]) {
+        openReject(REJECT_URL[act](id));
+        return;
+      }
       try {
         if (act === "submit") await api("/api/pr/" + id + "/submit", { method: "POST", body: "{}" });
         if (act === "dept-approve") await api("/api/pr/" + id + "/dept-approve", { method: "POST", body: "{}" });
-        if (act === "dept-reject") await api("/api/pr/" + id + "/dept-reject", { method: "POST", body: "{}" });
         if (act === "finance-approve") await api("/api/pr/" + id + "/finance-approve", { method: "POST", body: "{}" });
         if (act === "ceo-approve") await api("/api/pr/" + id + "/ceo-approve", { method: "POST", body: "{}" });
         if (act === "rfq") {
@@ -1310,8 +1482,6 @@
         if (act === "receive") await api("/api/po/" + id + "/receive", { method: "POST", body: JSON.stringify({ result: "accepted" }) });
         if (act === "receive-batch") await api("/api/po/" + id + "/receive-batch", { method: "POST", body: JSON.stringify({ result: "accepted" }) });
         if (act === "pr-cancel") await api("/api/pr/" + id + "/cancel", { method: "POST", body: "{}" });
-        if (act === "finance-reject") await api("/api/pr/" + id + "/finance-reject", { method: "POST", body: "{}" });
-        if (act === "ceo-reject") await api("/api/pr/" + id + "/ceo-reject", { method: "POST", body: "{}" });
         if (act === "po-cancel") await api("/api/po/" + id + "/cancel", { method: "POST", body: "{}" });
         if (act === "po-close") await api("/api/po/" + id + "/close", { method: "POST", body: "{}" });
         if (act === "asset-transfer") {
@@ -1353,7 +1523,6 @@
         }
         if (act === "prepay-submit") await api("/api/prepay/" + id + "/submit", { method: "POST", body: "{}" });
         if (act === "prepay-dept") await api("/api/prepay/" + id + "/dept-approve", { method: "POST", body: "{}" });
-        if (act === "prepay-dept-reject") await api("/api/prepay/" + id + "/dept-reject", { method: "POST", body: "{}" });
         if (act === "prepay-fin") await api("/api/prepay/" + id + "/finance-cosign", { method: "POST", body: "{}" });
         if (act === "prepay-ceo") await api("/api/prepay/" + id + "/ceo-approve", { method: "POST", body: "{}" });
         if (act === "prepay-pay-approve") await api("/api/prepay/" + id + "/payment-approve", { method: "POST", body: "{}" });
@@ -1417,7 +1586,6 @@
         }
         if (act === "pre-submit") await api("/api/pre/" + id + "/submit", { method: "POST", body: "{}" });
         if (act === "pre-dept") await api("/api/pre/" + id + "/dept-approve", { method: "POST", body: "{}" });
-        if (act === "pre-dept-reject") await api("/api/pre/" + id + "/dept-reject", { method: "POST", body: "{}" });
         if (act === "pre-cancel") await api("/api/pre/" + id + "/cancel", { method: "POST", body: "{}" });
         if (act === "exp-create") {
           const pre = (workspace.pres || []).find((row) => row.id === id);
@@ -1434,7 +1602,6 @@
         }
         if (act === "exp-submit") await api("/api/exp/" + id + "/submit", { method: "POST", body: "{}" });
         if (act === "exp-dept") await api("/api/exp/" + id + "/dept-approve", { method: "POST", body: "{}" });
-        if (act === "exp-dept-reject") await api("/api/exp/" + id + "/dept-reject", { method: "POST", body: "{}" });
         if (act === "exp-ticket") await api("/api/exp/" + id + "/ticket-check", { method: "POST", body: "{}" });
         if (act === "exp-cosign") await api("/api/exp/" + id + "/finance-cosign", { method: "POST", body: "{}" });
         if (act === "exp-pay") {
