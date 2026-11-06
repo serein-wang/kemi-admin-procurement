@@ -12,6 +12,7 @@ import {
 import { isRole, type Role } from "../domain/roles.js";
 import {
   approvalBand,
+  companyForCurrency,
   currencyForCompany,
   prepayThresholdKey,
   reimburseThresholdKey,
@@ -176,8 +177,8 @@ export class ProcurementService {
   createPr(actorId: string, input: CreatePrInput): PurchaseRequisition {
     const actor = this.requireUser(actorId);
     this.requireRole(actor, "applicant");
-    const companyCode = this.company(input.companyCode);
     const currency = this.currency(input.currency);
+    const companyCode = this.companyFromInput(input.companyCode, currency);
     this.assertCompanyCurrency(companyCode, currency);
     const deptId = this.requiredText(input.deptId, "部门");
     const purpose = this.requiredText(input.purpose, "事由");
@@ -192,7 +193,8 @@ export class ProcurementService {
       const estAmount = lineAmount(qty, line.estUnitPrice);
       return {
         itemName,
-        spec: (line.spec ?? "").trim(),
+        spec: this.lineNote(line.spec, "详细规格描述", 1000),
+        purchaseUrl: this.lineNote(line.purchaseUrl, "购买链接", 2000),
         qty,
         estUnitPrice: formatStored(line.estUnitPrice),
         estAmount,
@@ -2056,12 +2058,12 @@ export class ProcurementService {
 
   createPreApproval(
     actorId: string,
-    input: { companyCode: string; currency: string; deptId: string; purpose: string; amount: string },
+    input: { companyCode?: string; currency: string; deptId: string; purpose: string; amount: string },
   ): PreApproval {
     const actor = this.requireUser(actorId);
     this.requireRole(actor, "applicant");
-    const companyCode = this.company(input.companyCode);
     const currency = this.currency(input.currency);
+    const companyCode = this.companyFromInput(input.companyCode, currency);
     this.assertCompanyCurrency(companyCode, currency);
     const deptId = this.requiredText(input.deptId, "部门");
     const purpose = this.requiredText(input.purpose, "事由");
@@ -3260,9 +3262,24 @@ export class ProcurementService {
     return [...this.store.budgetHolds.values()].map((row) => clone(row));
   }
 
+  /** 表单不再提交公司。空值按币种落到现有 SZ/HK，显式错误公司仍拒绝。 */
+  private companyFromInput(raw: string | undefined, currency: CurrencyCode): CompanyCode {
+    const text = (raw ?? "").trim();
+    if (!text) return companyForCurrency(currency);
+    return this.company(text);
+  }
+
   private company(raw: string): CompanyCode {
     if (raw === "SZ" || raw === "HK") return raw;
     this.fail("INVALID_COMPANY", "公司代码仅为 SZ 或 HK");
+  }
+
+  private lineNote(raw: unknown, label: string, max: number): string {
+    if (raw == null) return "";
+    if (typeof raw !== "string") this.fail("INVALID_INPUT", `${label}格式不正确`);
+    const text = raw.trim();
+    if (text.length > max) this.fail("INVALID_INPUT", `${label}过长`);
+    return text;
   }
 
   private currency(raw: string): CurrencyCode {

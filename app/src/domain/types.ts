@@ -125,6 +125,8 @@ export interface PublicUser {
 export interface PrLine {
   itemName: string;
   spec: string;
+  /** 购买链接。可空。 */
+  purchaseUrl: string;
   qty: number;
   estUnitPrice: string;
   estAmount: string;
@@ -510,7 +512,8 @@ export interface AuditLog {
 }
 
 export interface CreatePrInput {
-  companyCode: string;
+  /** 省略时按币种推导：CNY→SZ，HKD→HK。 */
+  companyCode?: string;
   currency: string;
   deptId: string;
   purpose: string;
@@ -519,6 +522,7 @@ export interface CreatePrInput {
   lines: Array<{
     itemName: string;
     spec?: string;
+    purchaseUrl?: string;
     qty: number;
     estUnitPrice: string;
     category: string;

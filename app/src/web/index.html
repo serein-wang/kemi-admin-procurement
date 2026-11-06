@@ -108,16 +108,22 @@
       overflow: hidden;
     }
     label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
-    input, select, button { font: inherit; }
-    input, select {
+    input, select, textarea, button { font: inherit; }
+    input, select, textarea {
       width: 100%;
-      height: 32px;
       padding: 0 10px;
       border: 1px solid var(--control);
       border-radius: var(--radius);
       background: #fff;
       color: var(--ink);
       outline: none;
+    }
+    input, select { height: 32px; }
+    textarea {
+      min-height: 72px;
+      padding: 6px 10px;
+      resize: vertical;
+      line-height: 1.45;
     }
     select {
       appearance: none;
@@ -126,7 +132,7 @@
       background-repeat: no-repeat;
       background-position: right 8px center;
     }
-    input:focus, select:focus {
+    input:focus, select:focus, textarea:focus {
       border-color: var(--el-primary);
       box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.16);
     }
@@ -206,7 +212,7 @@
       background: #fff;
     }
     .doc strong { display: block; color: var(--ink); font-size: 14px; font-weight: 600; }
-    .meta { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .meta { color: var(--muted); font-size: 13px; margin-top: 4px; overflow-wrap: anywhere; }
     #audits { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; border: 1px solid #ebeef5; }
     th, td { text-align: left; border-bottom: 1px solid #ebeef5; padding: 8px 10px; vertical-align: top; }
@@ -251,12 +257,14 @@
           <input name="purpose" value="会议室显示器" required />
           <label>部门</label>
           <input name="deptId" value="D-ADMIN" required />
-          <label>公司</label>
-          <select name="companyCode"><option>SZ</option><option>HK</option></select>
           <label>币种</label>
-          <select name="currency"><option>CNY</option><option>HKD</option></select>
+          <select name="currency"><option value="CNY" selected>CNY</option><option value="HKD">HKD</option></select>
           <label>品名</label>
           <input name="itemName" value="显示器" required />
+          <label>详细规格描述</label>
+          <textarea name="spec" maxlength="1000" placeholder="尺寸、型号、配置">27 寸 IPS，壁挂支架</textarea>
+          <label>购买链接</label>
+          <input name="purchaseUrl" type="url" maxlength="2000" value="https://example.com/monitor" placeholder="https://" />
           <label>数量</label>
           <input name="qty" type="number" min="1" step="1" value="2" required />
           <label>预估单价</label>
@@ -278,10 +286,8 @@
           <input name="purpose" value="垫付办公耗材" required />
           <label>部门</label>
           <input name="deptId" value="D-ADMIN" required />
-          <label>公司</label>
-          <select name="companyCode"><option>SZ</option><option>HK</option></select>
           <label>币种</label>
-          <select name="currency"><option>CNY</option><option>HKD</option></select>
+          <select name="currency"><option value="CNY" selected>CNY</option><option value="HKD">HKD</option></select>
           <label>金额</label>
           <input name="amount" value="80.00" required />
           <div class="row"><button type="submit">创建事前草稿</button></div>
@@ -380,6 +386,7 @@
           + " · 财务关卡 " + pr.financeGate
           + " · 总经理关卡 " + pr.ceoGate
           + " · 比价 " + (pr.rfqRequired == null ? "未定" : pr.rfqRequired ? "必须" : "可免");
+        const lineDetail = prLineDetail(pr.lines);
         const actions = document.createElement("div");
         actions.className = "row";
         if (pr.status === "draft" && me && me.id === pr.applicantId) actions.append(button("提交", "submit", pr.id));
@@ -421,7 +428,14 @@
           vendor.dataset.id = pr.id;
           actions.append(terms, vendor, button("下采购单", "issue", pr.id));
         }
-        block.append(title, meta, actions);
+        block.append(title, meta);
+        if (lineDetail) {
+          const detail = document.createElement("div");
+          detail.className = "meta";
+          detail.textContent = lineDetail;
+          block.append(detail);
+        }
+        block.append(actions);
         wrap.append(block);
       }
       for (const po of workspace.pos) {
@@ -800,6 +814,21 @@
       auditsEl.append(table);
     }
 
+    function prLineDetail(lines) {
+      const rows = [];
+      for (const line of lines || []) {
+        const spec = (line.spec || "").trim();
+        const url = (line.purchaseUrl || "").trim();
+        if (!spec && !url) continue;
+        const parts = [];
+        if (line.itemName) parts.push(line.itemName);
+        if (spec) parts.push("规格 " + spec);
+        if (url) parts.push(url);
+        rows.push(parts.join(" · "));
+      }
+      return rows.join("；");
+    }
+
     function fieldValue(field, id) {
       const el = document.querySelector("[data-field='" + field + "'][data-id='" + id + "']");
       return el ? el.value : "";
@@ -817,16 +846,6 @@
           + (meta.thresholdReady.HKD ? "" : "HKD")
           + "）。未注入前，审批会拒绝而不会套用默认金额。金蝶回写本期不做。";
         devBox.append(warn);
-      }
-      for (const form of [document.querySelector("#pr-form"), document.querySelector("#pre-form")]) {
-        if (!form || form.dataset.paired) continue;
-        form.dataset.paired = "1";
-        const company = form.querySelector("[name=companyCode]");
-        const currency = form.querySelector("[name=currency]");
-        const syncFromCompany = () => { currency.value = company.value === "HK" ? "HKD" : "CNY"; };
-        const syncFromCurrency = () => { company.value = currency.value === "HKD" ? "HK" : "SZ"; };
-        company.addEventListener("change", syncFromCompany);
-        currency.addEventListener("change", syncFromCurrency);
       }
       try {
         const meRes = await api("/auth/me");
@@ -882,7 +901,6 @@
         const created = await api("/api/pre", {
           method: "POST",
           body: JSON.stringify({
-            companyCode: form.get("companyCode"),
             currency: form.get("currency"),
             deptId: form.get("deptId"),
             purpose: form.get("purpose"),
@@ -903,12 +921,13 @@
         const created = await api("/api/pr", {
           method: "POST",
           body: JSON.stringify({
-            companyCode: form.get("companyCode"),
             currency: form.get("currency"),
             deptId: form.get("deptId"),
             purpose: form.get("purpose"),
             lines: [{
               itemName: form.get("itemName"),
+              spec: form.get("spec"),
+              purchaseUrl: form.get("purchaseUrl"),
               qty: Number(form.get("qty")),
               estUnitPrice: String(form.get("estUnitPrice")),
               category: form.get("category"),
