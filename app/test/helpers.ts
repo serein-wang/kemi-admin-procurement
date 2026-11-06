@@ -9,7 +9,8 @@ import { ErpProInboundStub } from "../src/erp/inbound.js";
 /**
  * 夹具数字只用于断言审批路由，不是业务阈值，也不是程序默认值。
  * 请购：低额 < 10000；高额 ≥ 50000；比价 ≥ 1000；资本化 ≥ 8000。
- * 预付：低额 < 3000；高额 ≥ 20000；合同强制 ≥ 8000。比例上限 0.80。
+ * 预付：低额 < 3000；高额 ≥ 20000；合同强制 ≥ 8000。比例上限 0.80。超期 30 天。
+ * 报销：达到 2000 为超额（②-7）。
  */
 export const FIXTURE_THRESHOLDS: ThresholdConfig = {
   ...emptyThresholds(),
@@ -27,12 +28,15 @@ export const FIXTURE_THRESHOLDS: ThresholdConfig = {
   THR_HKD_PREPAY_CEO: "20000.00",
   THR_CNY_PREPAY_CONTRACT: "8000.00",
   THR_HKD_PREPAY_CONTRACT: "8000.00",
+  THR_CNY_REIM: "2000.00",
+  THR_HKD_REIM: "2000.00",
 };
 
 export const FIXTURE_PREPAY_POLICY: PrepayPolicy = {
   ratioMax: "0.80",
   allowFullPrepay: false,
   inheritPrMatrix: false,
+  overdueDays: 30,
 };
 
 export { emptyPrepayPolicy };
@@ -60,6 +64,7 @@ export async function boot(options?: {
   allowDevLogin?: boolean;
   oidc?: OidcClient;
   seedDemoUsers?: boolean;
+  clock?: () => Date;
 }) {
   const app = Fastify({ logger: false });
   const erp = new ErpProInboundStub();
@@ -71,6 +76,7 @@ export async function boot(options?: {
     seedDemoUsers: options?.seedDemoUsers ?? true,
     sessionSecret: "test-session-secret-value",
     erp,
+    clock: options?.clock,
   });
   return { app, handle, erp };
 }

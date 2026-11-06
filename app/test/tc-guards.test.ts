@@ -101,9 +101,13 @@ test("预付比例占位不会变成默认数字", () => {
   assert.equal(policy.ratioMax, null);
   assert.equal(policy.allowFullPrepay, false);
   assert.equal(policy.inheritPrMatrix, false);
+  assert.equal(policy.overdueDays, null);
   assert.equal(loadPrepayPolicy({ PREPAY_RATIO_MAX: "PLACEHOLDER" }).ratioMax, null);
+  assert.equal(loadPrepayPolicy({ PREPAY_OVERDUE_DAYS: "PLACEHOLDER" }).overdueDays, null);
+  assert.equal(loadPrepayPolicy({ PREPAY_OVERDUE_DAYS: "30" }).overdueDays, 30);
   assert.equal(loadPrepayPolicy({ ALLOW_FULL_PREPAY: "true" }).allowFullPrepay, true);
   assert.throws(() => loadPrepayPolicy({ PREPAY_RATIO_MAX: "1.5" }));
+  assert.throws(() => loadPrepayPolicy({ PREPAY_OVERDUE_DAYS: "0" }));
 });
 
 test("固资品类强制建卡，费用化接口拒绝", async () => {

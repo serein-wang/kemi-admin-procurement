@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>行政采购 · 阶段 2</title>
+  <title>行政采购 · 阶段 3</title>
   <style>
     :root { color-scheme: light; --ink: #1c2430; --muted: #5c6b7a; --line: #d5dde5; --paper: #f4f7f8; --card: #fff; --accent: #0f4c5c; }
     * { box-sizing: border-box; }
@@ -35,7 +35,7 @@
 <body>
   <header>
     <h1>行政采购（非生产）</h1>
-    <p>路径①货到付款 / 月结 / 预付。身份走 KEMI OIDC。角色、SoD 与阈值都在本模块。不做金蝶回写。</p>
+    <p>路径①货到付款 / 月结 / 预付 / 超期例外，以及路径②强制事前报销。身份走 KEMI OIDC。角色、SoD 与阈值都在本模块。不做金蝶回写。</p>
   </header>
   <main class="grid">
     <section>
@@ -75,12 +75,28 @@
           <div class="row"><button type="submit">创建草稿</button></div>
         </form>
       </div>
+      <div class="card">
+        <h2>②-1 事前申请</h2>
+        <form id="pre-form">
+          <label>事由</label>
+          <input name="purpose" value="垫付办公耗材" required />
+          <label>部门</label>
+          <input name="deptId" value="D-ADMIN" required />
+          <label>公司</label>
+          <select name="companyCode"><option>SZ</option><option>HK</option></select>
+          <label>币种</label>
+          <select name="currency"><option>CNY</option><option>HKD</option></select>
+          <label>金额</label>
+          <input name="amount" value="80.00" required />
+          <div class="row"><button type="submit">创建事前草稿</button></div>
+        </form>
+      </div>
     </section>
     <section>
       <div id="notice"></div>
       <div class="card">
         <h2>单据</h2>
-        <div id="docs" class="meta">登录后显示请购、采购单与付款。</div>
+        <div id="docs" class="meta">登录后显示请购、采购单、预付、事前与报销。</div>
       </div>
       <div class="card">
         <h2>审计</h2>
@@ -147,6 +163,12 @@
         return;
       }
       const wrap = document.createElement("div");
+      if (hasRole("finance")) {
+        const tools = document.createElement("div");
+        tools.className = "row";
+        tools.append(button("运行①-E1超期清单", "overdue-scan", "all"));
+        wrap.append(tools);
+      }
       for (const pr of workspace.prs) {
         const block = document.createElement("div");
         block.className = "doc";
@@ -348,6 +370,48 @@
         if (refund && refund.status === "finance_approved" && refund.mode === "suspense" && hasRole("finance")) {
           actions.append(button("确认挂账", "prepay-refund-exec", prepay.id));
         }
+        if (prepay.status === "awaiting_delivery" && hasRole("finance")) {
+          actions.append(button("运行超期清单", "overdue-scan", prepay.id));
+        }
+        if ((prepay.status === "overdue_flagged" || prepay.status === "chasing") && hasRole("admin")) {
+          const note = document.createElement("input");
+          note.placeholder = "跟催记录";
+          note.value = "供应商未回复";
+          note.dataset.field = "chase-note";
+          note.dataset.id = prepay.id;
+          const outcome = document.createElement("select");
+          outcome.dataset.field = "chase-outcome";
+          outcome.dataset.id = prepay.id;
+          outcome.innerHTML = "<option value='no_result'>无果</option><option value='promised'>承诺交期</option>";
+          const promised = document.createElement("input");
+          promised.placeholder = "承诺交期 YYYY-MM-DD";
+          promised.dataset.field = "chase-date";
+          promised.dataset.id = prepay.id;
+          actions.append(note, outcome, promised, button("跟催", "prepay-chase", prepay.id));
+        }
+        if (prepay.status === "chasing" && hasRole("admin")) {
+          actions.append(button("申请追索", "prepay-reclaim", prepay.id));
+        }
+        const reclaim = (workspace.reclaims || []).find((row) => row.prepayId === prepay.id);
+        if (reclaim && reclaim.status === "requested" && hasRole("cashier")) {
+          const bank = document.createElement("input");
+          bank.placeholder = "收款回单号";
+          bank.value = "RECLAIM-BANK";
+          bank.dataset.field = "reclaim-bank";
+          bank.dataset.id = prepay.id;
+          const voucher = document.createElement("input");
+          voucher.placeholder = "冲预付凭证号";
+          voucher.value = "RECLAIM-REV";
+          voucher.dataset.field = "reclaim-voucher";
+          voucher.dataset.id = prepay.id;
+          actions.append(bank, voucher, button("追索入账", "prepay-reclaim-exec", prepay.id));
+          const reason = document.createElement("input");
+          reason.placeholder = "纠纷原因码";
+          reason.value = "VENDOR_DENY";
+          reason.dataset.field = "reclaim-reason";
+          reason.dataset.id = prepay.id;
+          actions.append(reason, button("挂纠纷", "prepay-reclaim-dispute", prepay.id));
+        }
         block.append(title, meta, actions);
         wrap.append(block);
       }
@@ -370,6 +434,78 @@
           bank.dataset.field = "bank";
           bank.dataset.id = pay.id;
           actions.append(bank, button("出纳付款", "pay", pay.id));
+        }
+        block.append(title, meta, actions);
+        wrap.append(block);
+      }
+      for (const pre of workspace.pres || []) {
+        const block = document.createElement("div");
+        block.className = "doc";
+        const title = document.createElement("strong");
+        title.textContent = pre.docNo + " · 事前 " + pre.amount + " " + pre.currency + " · " + pre.purpose;
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = "事前 " + pre.status + (pre.consumedByExpenseId ? " · 占用 " + pre.consumedByExpenseId : "");
+        const actions = document.createElement("div");
+        actions.className = "row";
+        if (pre.status === "draft" && me && me.id === pre.applicantId) actions.append(button("提交事前", "pre-submit", pre.id));
+        if (pre.status === "submitted" && hasRole("dept")) {
+          actions.append(button("事前通过", "pre-dept", pre.id));
+          actions.append(button("驳回", "pre-dept-reject", pre.id, "danger"));
+        }
+        if ((pre.status === "draft" || pre.status === "submitted" || pre.status === "approved") && me && me.id === pre.applicantId && !pre.consumedByExpenseId) {
+          actions.append(button("取消事前", "pre-cancel", pre.id, "ghost"));
+        }
+        if (pre.status === "approved" && me && me.id === pre.applicantId) {
+          const amount = document.createElement("input");
+          amount.placeholder = "报销金额";
+          amount.value = pre.amount;
+          amount.dataset.field = "exp-amount";
+          amount.dataset.id = pre.id;
+          const invoice = document.createElement("input");
+          invoice.placeholder = "发票号码";
+          invoice.value = "EXP-" + pre.id;
+          invoice.dataset.field = "exp-invoice";
+          invoice.dataset.id = pre.id;
+          const account = document.createElement("input");
+          account.placeholder = "员工收款账户";
+          account.value = "62220001";
+          account.dataset.field = "exp-account";
+          account.dataset.id = pre.id;
+          actions.append(amount, invoice, account, button("提报销草稿", "exp-create", pre.id));
+        }
+        block.append(title, meta, actions);
+        wrap.append(block);
+      }
+      for (const expense of workspace.expenses || []) {
+        const block = document.createElement("div");
+        block.className = "doc";
+        const title = document.createElement("strong");
+        title.textContent = expense.docNo + " · 报销 " + expense.amount + " " + expense.currency;
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = "报销 " + expense.status
+          + " · 事前 " + expense.preApprovalId
+          + " · 财务关卡 " + expense.financeGate
+          + " · 发票 " + (expense.invoiceNos || []).join(",");
+        const actions = document.createElement("div");
+        actions.className = "row";
+        if (expense.status === "draft" && me && me.id === expense.applicantId) actions.append(button("提交报销", "exp-submit", expense.id));
+        if (expense.status === "submitted" && hasRole("dept")) {
+          actions.append(button("部门通过", "exp-dept", expense.id));
+          actions.append(button("驳回", "exp-dept-reject", expense.id, "danger"));
+        }
+        if (expense.status === "dept_approved" && hasRole("finance")) actions.append(button("审票", "exp-ticket", expense.id));
+        if (expense.status === "ticket_checked" && expense.financeGate === "required" && hasRole("finance")) {
+          actions.append(button("超额加签", "exp-cosign", expense.id));
+        }
+        if (expense.status === "payment_approved" && hasRole("cashier")) {
+          const bank = document.createElement("input");
+          bank.placeholder = "银行回单号";
+          bank.value = "EXP-BANK";
+          bank.dataset.field = "exp-bank";
+          bank.dataset.id = expense.id;
+          actions.append(bank, button("打款给员工", "exp-pay", expense.id));
         }
         block.append(title, meta, actions);
         wrap.append(block);
@@ -472,6 +608,27 @@
       await api("/auth/logout", { method: "POST", body: "{}" });
       notice("", "");
       await refresh();
+    });
+
+    document.querySelector("#pre-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = new FormData(event.target);
+      try {
+        const created = await api("/api/pre", {
+          method: "POST",
+          body: JSON.stringify({
+            companyCode: form.get("companyCode"),
+            currency: form.get("currency"),
+            deptId: form.get("deptId"),
+            purpose: form.get("purpose"),
+            amount: String(form.get("amount")),
+          }),
+        });
+        notice("ok", "已创建 " + created.docNo);
+        await refresh();
+      } catch (error) {
+        notice("error", error.message);
+      }
     });
 
     document.querySelector("#pr-form").addEventListener("submit", async (event) => {
@@ -605,6 +762,62 @@
           await api("/api/payments/" + id + "/pay", {
             method: "POST",
             body: JSON.stringify({ bankRef: fieldValue("bank", id) }),
+          });
+        }
+        if (act === "overdue-scan") await api("/api/prepay-overdue/scan", { method: "POST", body: "{}" });
+        if (act === "prepay-chase") {
+          await api("/api/prepay/" + id + "/chase", {
+            method: "POST",
+            body: JSON.stringify({
+              outcome: fieldValue("chase-outcome", id),
+              note: fieldValue("chase-note", id),
+              promisedDeliveryDate: fieldValue("chase-date", id),
+            }),
+          });
+        }
+        if (act === "prepay-reclaim") await api("/api/prepay/" + id + "/reclaim", { method: "POST", body: "{}" });
+        if (act === "prepay-reclaim-exec") {
+          await api("/api/prepay/" + id + "/reclaim/execute", {
+            method: "POST",
+            body: JSON.stringify({
+              outcome: "reclaimed",
+              bankRef: fieldValue("reclaim-bank", id),
+              reversalVoucherRef: fieldValue("reclaim-voucher", id),
+            }),
+          });
+        }
+        if (act === "prepay-reclaim-dispute") {
+          await api("/api/prepay/" + id + "/reclaim/execute", {
+            method: "POST",
+            body: JSON.stringify({ outcome: "disputed", disputeReason: fieldValue("reclaim-reason", id) }),
+          });
+        }
+        if (act === "pre-submit") await api("/api/pre/" + id + "/submit", { method: "POST", body: "{}" });
+        if (act === "pre-dept") await api("/api/pre/" + id + "/dept-approve", { method: "POST", body: "{}" });
+        if (act === "pre-dept-reject") await api("/api/pre/" + id + "/dept-reject", { method: "POST", body: "{}" });
+        if (act === "pre-cancel") await api("/api/pre/" + id + "/cancel", { method: "POST", body: "{}" });
+        if (act === "exp-create") {
+          const pre = (workspace.pres || []).find((row) => row.id === id);
+          await api("/api/exp", {
+            method: "POST",
+            body: JSON.stringify({
+              preApprovalId: id,
+              purpose: pre ? pre.purpose : "报销",
+              amount: fieldValue("exp-amount", id),
+              invoiceNos: [fieldValue("exp-invoice", id)],
+              employeeAccount: fieldValue("exp-account", id),
+            }),
+          });
+        }
+        if (act === "exp-submit") await api("/api/exp/" + id + "/submit", { method: "POST", body: "{}" });
+        if (act === "exp-dept") await api("/api/exp/" + id + "/dept-approve", { method: "POST", body: "{}" });
+        if (act === "exp-dept-reject") await api("/api/exp/" + id + "/dept-reject", { method: "POST", body: "{}" });
+        if (act === "exp-ticket") await api("/api/exp/" + id + "/ticket-check", { method: "POST", body: "{}" });
+        if (act === "exp-cosign") await api("/api/exp/" + id + "/finance-cosign", { method: "POST", body: "{}" });
+        if (act === "exp-pay") {
+          await api("/api/exp/" + id + "/pay", {
+            method: "POST",
+            body: JSON.stringify({ bankRef: fieldValue("exp-bank", id) }),
           });
         }
         notice("ok", "已完成");

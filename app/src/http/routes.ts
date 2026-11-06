@@ -75,7 +75,7 @@ export async function registerRoutes(
     return typeof value === "string" ? value : "";
   }
 
-  app.get("/health", async () => ({ ok: true, module: "admin-procurement", phase: 2 }));
+  app.get("/health", async () => ({ ok: true, module: "admin-procurement", phase: 3 }));
 
   app.get("/", async (_request, reply) => {
     return reply.type("text/html; charset=utf-8").send(page);
@@ -88,6 +88,11 @@ export async function registerRoutes(
       devLogin: options.allowDevLogin,
       demoUsers: options.allowDevLogin ? handle.demoUsers : [],
       thresholdReady: { CNY: ready("CNY"), HKD: ready("HKD") },
+      reimburseReady: {
+        CNY: options.thresholds.THR_CNY_REIM != null,
+        HKD: options.thresholds.THR_HKD_REIM != null,
+      },
+      prepayOverdueDaysConfigured: options.prepayPolicy?.overdueDays != null,
     };
   });
 
@@ -421,6 +426,155 @@ export async function registerRoutes(
   app.post("/api/prepay/:id/refund/execute", async (request) => {
     const session = requireSession(request);
     return handle.service.executePrepayRefund(
+      session.userId,
+      (request.params as { id: string }).id,
+      text(body(request).bankRef),
+    );
+  });
+
+  app.get("/api/prepay-overdue", async (request) => {
+    requireSession(request);
+    return handle.service.listPrepayOverdue();
+  });
+
+  app.post("/api/prepay-overdue/scan", async (request) => {
+    const session = requireSession(request);
+    return handle.service.scanPrepayOverdue(session.userId);
+  });
+
+  app.post("/api/prepay/:id/chase", async (request) => {
+    const session = requireSession(request);
+    const input = body(request);
+    return handle.service.recordPrepayChase(session.userId, (request.params as { id: string }).id, {
+      outcome: text(input.outcome),
+      note: text(input.note),
+      promisedDeliveryDate: text(input.promisedDeliveryDate),
+    });
+  });
+
+  app.post("/api/prepay/:id/reclaim", async (request) => {
+    const session = requireSession(request);
+    return handle.service.requestPrepayReclaim(session.userId, (request.params as { id: string }).id);
+  });
+
+  app.post("/api/prepay/:id/reclaim/execute", async (request) => {
+    const session = requireSession(request);
+    const input = body(request);
+    return handle.service.executePrepayReclaim(session.userId, (request.params as { id: string }).id, {
+      outcome: text(input.outcome),
+      bankRef: text(input.bankRef),
+      reversalVoucherRef: text(input.reversalVoucherRef),
+      disputeReason: text(input.disputeReason),
+    });
+  });
+
+  app.post("/api/pre", async (request) => {
+    const session = requireSession(request);
+    const input = body(request);
+    return handle.service.createPreApproval(session.userId, {
+      companyCode: text(input.companyCode),
+      currency: text(input.currency),
+      deptId: text(input.deptId),
+      purpose: text(input.purpose),
+      amount: text(input.amount),
+    });
+  });
+
+  app.get("/api/pre/:id", async (request) => {
+    requireSession(request);
+    return handle.service.getPreApproval((request.params as { id: string }).id);
+  });
+
+  app.post("/api/pre/:id/submit", async (request) => {
+    const session = requireSession(request);
+    return handle.service.submitPreApproval(session.userId, (request.params as { id: string }).id);
+  });
+
+  app.post("/api/pre/:id/dept-approve", async (request) => {
+    const session = requireSession(request);
+    return handle.service.approvePreApproval(
+      session.userId,
+      (request.params as { id: string }).id,
+      text(body(request).comment),
+    );
+  });
+
+  app.post("/api/pre/:id/dept-reject", async (request) => {
+    const session = requireSession(request);
+    return handle.service.rejectPreApproval(
+      session.userId,
+      (request.params as { id: string }).id,
+      text(body(request).comment),
+    );
+  });
+
+  app.post("/api/pre/:id/cancel", async (request) => {
+    const session = requireSession(request);
+    return handle.service.cancelPreApproval(session.userId, (request.params as { id: string }).id);
+  });
+
+  app.post("/api/exp", async (request) => {
+    const session = requireSession(request);
+    const input = body(request);
+    return handle.service.createExpense(session.userId, {
+      preApprovalId: text(input.preApprovalId),
+      purpose: text(input.purpose),
+      amount: text(input.amount),
+      invoiceNos: input.invoiceNos,
+      employeeAccount: text(input.employeeAccount),
+    });
+  });
+
+  app.get("/api/exp/:id", async (request) => {
+    requireSession(request);
+    return handle.service.getExpense((request.params as { id: string }).id);
+  });
+
+  app.post("/api/exp/:id/submit", async (request) => {
+    const session = requireSession(request);
+    return handle.service.submitExpense(session.userId, (request.params as { id: string }).id);
+  });
+
+  app.post("/api/exp/:id/dept-approve", async (request) => {
+    const session = requireSession(request);
+    return handle.service.approveExpenseDept(
+      session.userId,
+      (request.params as { id: string }).id,
+      text(body(request).comment),
+    );
+  });
+
+  app.post("/api/exp/:id/dept-reject", async (request) => {
+    const session = requireSession(request);
+    return handle.service.rejectExpenseDept(
+      session.userId,
+      (request.params as { id: string }).id,
+      text(body(request).comment),
+    );
+  });
+
+  app.post("/api/exp/:id/cancel", async (request) => {
+    const session = requireSession(request);
+    return handle.service.cancelExpense(session.userId, (request.params as { id: string }).id);
+  });
+
+  app.post("/api/exp/:id/ticket-check", async (request) => {
+    const session = requireSession(request);
+    return handle.service.checkExpenseTicket(session.userId, (request.params as { id: string }).id);
+  });
+
+  app.post("/api/exp/:id/finance-cosign", async (request) => {
+    const session = requireSession(request);
+    return handle.service.cosignExpense(
+      session.userId,
+      (request.params as { id: string }).id,
+      text(body(request).comment),
+    );
+  });
+
+  app.post("/api/exp/:id/pay", async (request) => {
+    const session = requireSession(request);
+    return handle.service.payExpense(
       session.userId,
       (request.params as { id: string }).id,
       text(body(request).bankRef),
