@@ -1,5 +1,6 @@
 import { parseCategory } from "../domain/categories.js";
 import { DomainError } from "../domain/errors.js";
+import { decodeLineImages, imageExtension, type DecodedLineImage, type ImageMime } from "../domain/images.js";
 import {
   addAmount,
   compareAmount,
@@ -48,6 +49,7 @@ import type {
   PrepayRequest,
   PrepaySettle,
   PrLine,
+  PrLineImage,
   PublicUser,
   PurchaseOrder,
   PurchaseRequisition,
@@ -186,7 +188,7 @@ export class ProcurementService {
     if (!Array.isArray(input.lines) || input.lines.length < 1 || input.lines.length > 50) {
       this.fail("INVALID_LINES", "请购至少 1 行、至多 50 行");
     }
-    const lines: PrLine[] = input.lines.map((line) => {
+    const prepared = input.lines.map((line) => {
       const itemName = this.requiredText(line.itemName, "品名");
       const category = parseCategory(line.category);
       const qty = line.qty;
@@ -199,8 +201,19 @@ export class ProcurementService {
         estUnitPrice: formatStored(line.estUnitPrice),
         estAmount,
         category,
+        decodedImages: decodeLineImages(line.images),
       };
     });
+    const lines: PrLine[] = prepared.map((line) => ({
+      itemName: line.itemName,
+      spec: line.spec,
+      purchaseUrl: line.purchaseUrl,
+      qty: line.qty,
+      estUnitPrice: line.estUnitPrice,
+      estAmount: line.estAmount,
+      category: line.category,
+      images: line.decodedImages.map((image) => this.storeLineImage(image)),
+    }));
     let amount = "0.00";
     for (const line of lines) amount = addAmount(amount, line.estAmount);
     const docType = lines.every((line) => line.category === "low_value") ? "low_value" : "standard";
@@ -2482,6 +2495,14 @@ export class ProcurementService {
     return clone(this.pr(id));
   }
 
+  /** 已登录用户读取请购行贴图。响应是图片字节，不是 HTML。 */
+  readLineImage(id: string): { mime: ImageMime; bytes: Buffer; filename: string } {
+    if (!/^IMG-\d{4,}$/.test(id)) this.fail("NOT_FOUND", "贴图不存在", 404);
+    const row = this.store.images.get(id);
+    if (!row) this.fail("NOT_FOUND", "贴图不存在", 404);
+    return { mime: row.mime, bytes: row.bytes, filename: `${id}.${imageExtension(row.mime)}` };
+  }
+
   getPo(id: string): PurchaseOrder {
     return clone(this.po(id));
   }
@@ -3272,6 +3293,12 @@ export class ProcurementService {
   private company(raw: string): CompanyCode {
     if (raw === "SZ" || raw === "HK") return raw;
     this.fail("INVALID_COMPANY", "公司代码仅为 SZ 或 HK");
+  }
+
+  private storeLineImage(image: DecodedLineImage): PrLineImage {
+    const id = this.store.nextId("IMG");
+    this.store.images.set(id, { mime: image.mime, bytes: image.bytes, name: image.name });
+    return { id, mime: image.mime, name: image.name, byteLength: image.bytes.length };
   }
 
   private lineNote(raw: unknown, label: string, max: number): string {

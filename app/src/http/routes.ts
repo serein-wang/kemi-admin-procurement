@@ -38,6 +38,12 @@ export async function registerRoutes(
         sodViolationCode: error.sodViolationCode ?? null,
       });
     }
+    const statusCode = typeof (error as { statusCode?: unknown }).statusCode === "number"
+      ? (error as { statusCode: number }).statusCode
+      : 0;
+    if (statusCode === 413) {
+      return reply.status(413).send({ error: "PAYLOAD_TOO_LARGE", message: "请求体过大" });
+    }
     request.log.error({ err: error }, "unhandled");
     return reply.status(500).send({ error: "INTERNAL", message: "服务器错误" });
   });
@@ -200,7 +206,7 @@ export async function registerRoutes(
     return { user: handle.service.setRoles(session.userId, params.id, roles) };
   });
 
-  app.post("/api/pr", async (request) => {
+  app.post("/api/pr", { bodyLimit: 14 * 1024 * 1024 }, async (request) => {
     const session = requireSession(request);
     const input = body(request);
     return handle.service.createPr(session.userId, {
@@ -212,6 +218,16 @@ export async function registerRoutes(
       budgetId: typeof input.budgetId === "string" ? input.budgetId : null,
       lines: Array.isArray(input.lines) ? input.lines as never : [],
     });
+  });
+
+  app.get("/api/attachments/:id", async (request, reply) => {
+    requireSession(request);
+    const image = handle.service.readLineImage((request.params as { id: string }).id);
+    reply.header("X-Content-Type-Options", "nosniff");
+    reply.header("Content-Security-Policy", "default-src 'none'");
+    reply.header("Cache-Control", "private, max-age=3600");
+    reply.header("Content-Disposition", `inline; filename="${image.filename}"`);
+    return reply.type(image.mime).send(image.bytes);
   });
 
   app.get("/api/pr/:id", async (request) => {

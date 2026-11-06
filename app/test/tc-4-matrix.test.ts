@@ -150,9 +150,16 @@ test("走查表单不提交公司；省略公司时按币种推导，并保存�
     assert.match(prForm ?? "", /id="pr-form"/);
     assert.match(preForm ?? "", /id="pre-form"/);
     for (const form of forms) {
-      assert.match(form, /<select name="currency"><option value="CNY" selected>CNY<\/option><option value="HKD">HKD<\/option><\/select>/);
+      assert.match(form, /币种固定为 CNY/);
+      assert.equal(form.includes("currency"), false);
+      assert.equal(form.includes("HKD"), false);
+      assert.equal(form.includes('name="currency"'), false);
       assert.equal(form.includes("公司"), false);
     }
+    assert.equal(html.includes('name="currency"'), false);
+    assert.equal(html.includes('form.get("currency")'), false);
+    assert.equal(html.includes(">HKD<"), false);
+    assert.equal((html.match(/currency:\s*"CNY"/g) ?? []).length, 2);
     assert.match(prForm, /name="itemName"/);
     assert.match(prForm, /详细规格描述/);
     assert.match(prForm, /name="spec"/);
@@ -196,6 +203,7 @@ test("走查表单不提交公司；省略公司时按币种推导，并保存�
     assert.equal(hkd.body.currency, "HKD");
     assert.equal(hkd.body.lines[0].spec, "");
     assert.equal(hkd.body.lines[0].purchaseUrl, "");
+    assert.deepEqual(hkd.body.lines[0].images, []);
 
     const pre = await call(app, people.applicant, "POST", "/api/pre", {
       currency: "CNY",
