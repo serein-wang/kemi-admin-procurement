@@ -294,6 +294,13 @@
           <p class="hint">币种固定为 CNY。</p>
           <label>品名</label>
           <input name="itemName" value="显示器" required />
+          <label>品类</label>
+          <select name="category">
+            <option value="consumable">耗材 consumable</option>
+            <option value="fixed_asset">固资 fixed_asset</option>
+            <option value="service">服务 service</option>
+            <option value="low_value">低值 low_value</option>
+          </select>
           <label>详细规格描述</label>
           <textarea name="spec" maxlength="1000" placeholder="尺寸、型号、配置。可在此粘贴图片">27 寸 IPS，壁挂支架</textarea>
           <label>贴图</label>
@@ -306,13 +313,6 @@
           <input name="qty" type="number" min="1" step="1" value="2" required />
           <label>预估单价</label>
           <input name="estUnitPrice" value="1500.00" required />
-          <label>品类</label>
-          <select name="category">
-            <option value="consumable">耗材 consumable</option>
-            <option value="fixed_asset">固资 fixed_asset</option>
-            <option value="service">服务 service</option>
-            <option value="low_value">低值 low_value</option>
-          </select>
           <div class="row"><button type="submit">创建草稿</button></div>
         </form>
       </div>
