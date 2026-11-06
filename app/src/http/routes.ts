@@ -87,6 +87,11 @@ export async function registerRoutes(
     return typeof value === "string" ? value : "";
   }
 
+  function rejectReason(request: FastifyRequest): string {
+    const input = body(request);
+    return text(input.reason ?? input.comment);
+  }
+
   app.get("/health", async () => ({ ok: true, module: "admin-procurement", phase: 4, kingdeeWriteback: "deferred" }));
 
   app.get("/", async (_request, reply) => {
@@ -190,6 +195,11 @@ export async function registerRoutes(
     return handle.service.workspace();
   });
 
+  app.get("/api/todos", async (request) => {
+    const session = requireSession(request);
+    return { todos: handle.service.listTodos(session.userId) };
+  });
+
   app.get("/api/audit", async (request) => {
     requireSession(request);
     const query = request.query as { entity?: string; entityId?: string };
@@ -247,17 +257,17 @@ export async function registerRoutes(
 
   app.post("/api/pr/:id/dept-reject", async (request) => {
     const session = requireSession(request);
-    return handle.service.rejectDept(session.userId, (request.params as { id: string }).id, text(body(request).comment));
+    return handle.service.rejectDept(session.userId, (request.params as { id: string }).id, rejectReason(request));
   });
 
   app.post("/api/pr/:id/finance-reject", async (request) => {
     const session = requireSession(request);
-    return handle.service.rejectFinance(session.userId, (request.params as { id: string }).id, text(body(request).comment));
+    return handle.service.rejectFinance(session.userId, (request.params as { id: string }).id, rejectReason(request));
   });
 
   app.post("/api/pr/:id/ceo-reject", async (request) => {
     const session = requireSession(request);
-    return handle.service.rejectCeo(session.userId, (request.params as { id: string }).id, text(body(request).comment));
+    return handle.service.rejectCeo(session.userId, (request.params as { id: string }).id, rejectReason(request));
   });
 
   app.post("/api/pr/:id/cancel", async (request) => {
@@ -457,7 +467,7 @@ export async function registerRoutes(
     return handle.service.rejectPrepayDept(
       session.userId,
       (request.params as { id: string }).id,
-      text(body(request).comment),
+      rejectReason(request),
     );
   });
 
@@ -602,7 +612,7 @@ export async function registerRoutes(
     return handle.service.rejectPreApproval(
       session.userId,
       (request.params as { id: string }).id,
-      text(body(request).comment),
+      rejectReason(request),
     );
   });
 
@@ -647,7 +657,7 @@ export async function registerRoutes(
     return handle.service.rejectExpenseDept(
       session.userId,
       (request.params as { id: string }).id,
-      text(body(request).comment),
+      rejectReason(request),
     );
   });
 

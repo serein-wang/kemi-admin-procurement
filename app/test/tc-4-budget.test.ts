@@ -41,7 +41,9 @@ test("TC-Q8 请购软占用，驳回、财务驳回、总经理驳回和取消�
     assert.equal(soft[0]?.budgetId, "BUD-DEPT");
     assert.equal(soft[0]?.companyCode, "SZ");
     assert.equal(soft[0]?.currency, "CNY");
-    const deptRejected = await call(app, people.dept, "POST", `/api/pr/${rejected.id}/dept-reject`);
+    const deptRejected = await call(app, people.dept, "POST", `/api/pr/${rejected.id}/dept-reject`, {
+      reason: "规格不符",
+    });
     assert.equal(deptRejected.body.status, "rejected");
     assert.equal(deptRejected.body.reserveStatus, "released");
     assert.equal(holds(handle, rejected.id)[0]?.status, "released");
@@ -54,7 +56,9 @@ test("TC-Q8 请购软占用，驳回、财务驳回、总经理驳回和取消�
       budgetId: "BUD-FIN",
     });
     assert.equal((await call(app, people.dept, "POST", `/api/pr/${mid.id}/dept-approve`)).body.status, "dept_approved");
-    const finRejected = await call(app, people.finance, "POST", `/api/pr/${mid.id}/finance-reject`);
+    const finRejected = await call(app, people.finance, "POST", `/api/pr/${mid.id}/finance-reject`, {
+      reason: "超出部门预算",
+    });
     assert.equal(finRejected.status, 200, JSON.stringify(finRejected.body));
     assert.equal(finRejected.body.status, "rejected");
     assert.equal(finRejected.body.reserveStatus, "released");
@@ -69,7 +73,9 @@ test("TC-Q8 请购软占用，驳回、财务驳回、总经理驳回和取消�
     });
     assert.equal((await call(app, people.dept, "POST", `/api/pr/${high.id}/dept-approve`)).status, 200);
     assert.equal((await call(app, people.finance, "POST", `/api/pr/${high.id}/finance-approve`)).status, 200);
-    const ceoRejected = await call(app, people.ceo, "POST", `/api/pr/${high.id}/ceo-reject`);
+    const ceoRejected = await call(app, people.ceo, "POST", `/api/pr/${high.id}/ceo-reject`, {
+      reason: "本期暂缓",
+    });
     assert.equal(ceoRejected.body.status, "rejected");
     assert.equal(holds(handle, high.id)[0]?.status, "released");
     assert.equal(holds(handle, high.id)[0]?.releaseReason, "pr_rejected");
