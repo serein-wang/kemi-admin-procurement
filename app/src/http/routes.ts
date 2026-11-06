@@ -4,7 +4,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { DomainError } from "../domain/errors.js";
-import { thresholdKey, type CurrencyCode } from "../domain/thresholds.js";
+import {
+  companyForCurrency,
+  prepayThresholdKey,
+  reimburseThresholdKey,
+  thresholdKey,
+  type CurrencyCode,
+} from "../domain/thresholds.js";
 import type { ModuleHandle, ModuleOptions, SessionRecord } from "../host.js";
 
 const PAGE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../web/index.html"), "utf8");
@@ -75,7 +81,7 @@ export async function registerRoutes(
     return typeof value === "string" ? value : "";
   }
 
-  app.get("/health", async () => ({ ok: true, module: "admin-procurement", phase: 3 }));
+  app.get("/health", async () => ({ ok: true, module: "admin-procurement", phase: 4, kingdeeWriteback: "deferred" }));
 
   app.get("/", async (_request, reply) => {
     return reply.type("text/html; charset=utf-8").send(page);
@@ -84,6 +90,20 @@ export async function registerRoutes(
   app.get("/api/meta", async () => {
     const ready = (currency: CurrencyCode) =>
       (["fin", "ceo", "rfq", "capex"] as const).every((kind) => options.thresholds[thresholdKey(currency, kind)] != null);
+    const matrix = (currency: CurrencyCode) => ({
+      companyCode: companyForCurrency(currency),
+      currency,
+      configured: {
+        fin: options.thresholds[thresholdKey(currency, "fin")] != null,
+        ceo: options.thresholds[thresholdKey(currency, "ceo")] != null,
+        rfq: options.thresholds[thresholdKey(currency, "rfq")] != null,
+        capex: options.thresholds[thresholdKey(currency, "capex")] != null,
+        prepayFin: options.thresholds[prepayThresholdKey(currency, "fin")] != null,
+        prepayCeo: options.thresholds[prepayThresholdKey(currency, "ceo")] != null,
+        prepayContract: options.thresholds[prepayThresholdKey(currency, "contract")] != null,
+        reim: options.thresholds[reimburseThresholdKey(currency)] != null,
+      },
+    });
     return {
       devLogin: options.allowDevLogin,
       demoUsers: options.allowDevLogin ? handle.demoUsers : [],
@@ -93,6 +113,8 @@ export async function registerRoutes(
         HKD: options.thresholds.THR_HKD_REIM != null,
       },
       prepayOverdueDaysConfigured: options.prepayPolicy?.overdueDays != null,
+      matrices: { SZ: matrix("CNY"), HK: matrix("HKD") },
+      kingdeeWriteback: "deferred",
     };
   });
 
@@ -212,6 +234,21 @@ export async function registerRoutes(
     return handle.service.rejectDept(session.userId, (request.params as { id: string }).id, text(body(request).comment));
   });
 
+  app.post("/api/pr/:id/finance-reject", async (request) => {
+    const session = requireSession(request);
+    return handle.service.rejectFinance(session.userId, (request.params as { id: string }).id, text(body(request).comment));
+  });
+
+  app.post("/api/pr/:id/ceo-reject", async (request) => {
+    const session = requireSession(request);
+    return handle.service.rejectCeo(session.userId, (request.params as { id: string }).id, text(body(request).comment));
+  });
+
+  app.post("/api/pr/:id/cancel", async (request) => {
+    const session = requireSession(request);
+    return handle.service.cancelPr(session.userId, (request.params as { id: string }).id);
+  });
+
   app.post("/api/pr/:id/finance-approve", async (request) => {
     const session = requireSession(request);
     return handle.service.approveFinance(
@@ -258,6 +295,23 @@ export async function registerRoutes(
     return handle.service.getPo((request.params as { id: string }).id);
   });
 
+  app.post("/api/po/:id/cancel", async (request) => {
+    const session = requireSession(request);
+    return handle.service.cancelPo(session.userId, (request.params as { id: string }).id);
+  });
+
+  app.post("/api/po/:id/close", async (request) => {
+    const session = requireSession(request);
+    return handle.service.closePaidPo(session.userId, (request.params as { id: string }).id);
+  });
+
+  app.post("/api/po/:id/receive-batch", async (request) => {
+    const session = requireSession(request);
+    return handle.service.receiveBatch(session.userId, (request.params as { id: string }).id, {
+      result: text(body(request).result),
+    });
+  });
+
   app.post("/api/po/:id/receive", async (request) => {
     const session = requireSession(request);
     const input = body(request);
@@ -295,6 +349,34 @@ export async function registerRoutes(
       location: text(input.location),
       name: text(input.name),
     });
+  });
+
+  app.get("/api/assets/:id", async (request) => {
+    requireSession(request);
+    return handle.service.getAsset((request.params as { id: string }).id);
+  });
+
+  app.post("/api/assets/:id/transfer", async (request) => {
+    const session = requireSession(request);
+    const input = body(request);
+    return handle.service.transferAsset(session.userId, (request.params as { id: string }).id, {
+      custodianId: text(input.custodianId),
+      location: text(input.location),
+    });
+  });
+
+  app.post("/api/assets/:id/retire", async (request) => {
+    const session = requireSession(request);
+    return handle.service.retireAsset(
+      session.userId,
+      (request.params as { id: string }).id,
+      text(body(request).comment),
+    );
+  });
+
+  app.get("/api/budget-holds", async (request) => {
+    requireSession(request);
+    return { holds: handle.service.listBudgetHolds() };
   });
 
   app.post("/api/invoices", async (request) => {

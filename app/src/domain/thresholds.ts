@@ -29,6 +29,18 @@ export type ThresholdConfig = Record<ThresholdKey, string | null>;
 export type CurrencyCode = "CNY" | "HKD";
 export type ThresholdKind = "fin" | "ceo" | "rfq" | "capex";
 
+/**
+ * Q4：同一套角色逻辑，SZ 与 HK 各用一张阈值表。
+ * 公司代码决定币种，两套数字独立注入，空值仍是占位。
+ */
+export function currencyForCompany(companyCode: "SZ" | "HK"): CurrencyCode {
+  return companyCode === "SZ" ? "CNY" : "HKD";
+}
+
+export function companyForCurrency(currency: CurrencyCode): "SZ" | "HK" {
+  return currency === "CNY" ? "SZ" : "HK";
+}
+
 export function emptyThresholds(): ThresholdConfig {
   return {
     THR_CNY_FIN: null,

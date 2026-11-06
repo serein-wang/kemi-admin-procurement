@@ -177,21 +177,29 @@
         const meta = document.createElement("div");
         meta.className = "meta";
         meta.textContent = "请购 " + pr.status
+          + " · " + pr.companyCode + "/" + pr.currency
+          + " · " + (pr.docType === "low_value" ? "低值易耗" : "标准")
+          + " · 预算 " + pr.reserveStatus
           + " · 财务关卡 " + pr.financeGate
           + " · 总经理关卡 " + pr.ceoGate
           + " · 比价 " + (pr.rfqRequired == null ? "未定" : pr.rfqRequired ? "必须" : "可免");
         const actions = document.createElement("div");
         actions.className = "row";
         if (pr.status === "draft" && me && me.id === pr.applicantId) actions.append(button("提交", "submit", pr.id));
+        if (["draft", "submitted", "dept_approved", "finance_approved", "ceo_approved", "sourcing", "ready_for_po"].includes(pr.status) && me && me.id === pr.applicantId) {
+          actions.append(button("取消请购", "pr-cancel", pr.id, "danger"));
+        }
         if (pr.status === "submitted" && hasRole("dept")) {
           actions.append(button("部门通过", "dept-approve", pr.id));
           actions.append(button("驳回", "dept-reject", pr.id, "danger"));
         }
         if (pr.status === "dept_approved" && pr.financeGate === "required" && hasRole("finance")) {
           actions.append(button("财务加签", "finance-approve", pr.id));
+          actions.append(button("财务驳回", "finance-reject", pr.id, "danger"));
         }
         if (pr.status === "finance_approved" && pr.ceoGate === "required" && hasRole("ceo")) {
           actions.append(button("总经理批准", "ceo-approve", pr.id));
+          actions.append(button("总经理驳回", "ceo-reject", pr.id, "danger"));
         }
         if (pr.status === "sourcing" && hasRole("admin") && pr.rfqRequired) {
           actions.append(button("登记三家比价（示例价）", "rfq", pr.id));
@@ -227,6 +235,8 @@
         const meta = document.createElement("div");
         meta.className = "meta";
         meta.textContent = "采购单 " + po.status
+          + " · " + po.companyCode + "/" + po.currency
+          + " · 预算 " + po.reserveStatus
           + " · 下单 " + userName(po.issuerId)
           + " · 验收人应是 " + userName(po.applicantId)
           + " · D4 " + po.disposition
@@ -235,6 +245,14 @@
         actions.className = "row";
         if ((po.status === "awaiting_receipt" || po.status === "partially_received") && me && me.id === po.applicantId) {
           actions.append(button("验收合格", "receive", po.id));
+          const source = workspace.prs.find((row) => row.id === po.prId);
+          if (source && source.docType === "low_value") actions.append(button("低值批量收货", "receive-batch", po.id));
+        }
+        if ((po.status === "awaiting_receipt" || po.status === "awaiting_prepay") && hasRole("admin")) {
+          actions.append(button("取消采购单", "po-cancel", po.id, "danger"));
+        }
+        if (po.status === "paid" && hasRole("admin")) {
+          actions.append(button("关闭并释放预算", "po-close", po.id));
         }
         if (po.status === "fully_received" && !po.dispositionDone && po.disposition === "expense" && hasRole("admin")) {
           actions.append(button("费用化 / 行政入库", "expense", po.id));
@@ -249,11 +267,13 @@
           custodian.dataset.field = "custodian";
           custodian.dataset.id = po.id;
           for (const user of workspace.users) {
+            if (me && user.id === me.id) continue;
             const option = document.createElement("option");
             option.value = user.id;
             option.textContent = user.displayName;
             custodian.append(option);
           }
+          if (po.applicantId) custodian.value = po.applicantId;
           actions.append(location, custodian, button("固定资产建卡", "asset", po.id));
         }
         const formalInvoice = (workspace.invoices || []).find((invoice) => invoice.poId === po.id && invoice.kind !== "proforma");
@@ -292,6 +312,41 @@
         }
         if (po.status === "matched" && hasRole("admin") && livePrepay && livePrepay.status === "settled_with_balance") {
           actions.append(button("发起尾款", "pay-request", po.id));
+        }
+        block.append(title, meta, actions);
+        wrap.append(block);
+      }
+      for (const card of workspace.assets || []) {
+        const block = document.createElement("div");
+        block.className = "doc";
+        const title = document.createElement("strong");
+        title.textContent = card.assetNo + " · " + card.name + " · " + card.capitalizedAmount + " " + card.currency;
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = "资产卡 " + card.status
+          + " · " + card.companyCode
+          + " · 建卡 " + userName(card.creatorId)
+          + " · 保管 " + userName(card.custodianId)
+          + " · " + card.location;
+        const actions = document.createElement("div");
+        actions.className = "row";
+        if (card.status !== "retired" && hasRole("admin")) {
+          const location = document.createElement("input");
+          location.placeholder = "新存放位置";
+          location.value = card.location;
+          location.dataset.field = "asset-location";
+          location.dataset.id = card.id;
+          const custodian = document.createElement("select");
+          custodian.dataset.field = "asset-custodian";
+          custodian.dataset.id = card.id;
+          for (const user of workspace.users) {
+            if (user.id === card.creatorId) continue;
+            const option = document.createElement("option");
+            option.value = user.id;
+            option.textContent = user.displayName;
+            custodian.append(option);
+          }
+          actions.append(location, custodian, button("调拨", "asset-transfer", card.id), button("停用", "asset-retire", card.id, "danger"));
         }
         block.append(title, meta, actions);
         wrap.append(block);
@@ -560,11 +615,21 @@
       if (!meta.thresholdReady.CNY || !meta.thresholdReady.HKD) {
         const warn = document.createElement("div");
         warn.className = "banner";
-        warn.textContent = "金额阈值仍是占位（"
+        warn.textContent = "SZ/CNY 与 HK/HKD 矩阵分开占位（"
           + (meta.thresholdReady.CNY ? "" : "CNY ")
           + (meta.thresholdReady.HKD ? "" : "HKD")
-          + "）。未注入前，审批会拒绝而不会套用默认金额。";
+          + "）。未注入前，审批会拒绝而不会套用默认金额。金蝶回写本期不做。";
         devBox.append(warn);
+      }
+      for (const form of [document.querySelector("#pr-form"), document.querySelector("#pre-form")]) {
+        if (!form || form.dataset.paired) continue;
+        form.dataset.paired = "1";
+        const company = form.querySelector("[name=companyCode]");
+        const currency = form.querySelector("[name=currency]");
+        const syncFromCompany = () => { currency.value = company.value === "HK" ? "HKD" : "CNY"; };
+        const syncFromCurrency = () => { company.value = currency.value === "HKD" ? "HK" : "SZ"; };
+        company.addEventListener("change", syncFromCompany);
+        currency.addEventListener("change", syncFromCurrency);
       }
       if (meta.devLogin) {
         const title = document.createElement("p");
@@ -698,6 +763,19 @@
           });
         }
         if (act === "receive") await api("/api/po/" + id + "/receive", { method: "POST", body: JSON.stringify({ result: "accepted" }) });
+        if (act === "receive-batch") await api("/api/po/" + id + "/receive-batch", { method: "POST", body: JSON.stringify({ result: "accepted" }) });
+        if (act === "pr-cancel") await api("/api/pr/" + id + "/cancel", { method: "POST", body: "{}" });
+        if (act === "finance-reject") await api("/api/pr/" + id + "/finance-reject", { method: "POST", body: "{}" });
+        if (act === "ceo-reject") await api("/api/pr/" + id + "/ceo-reject", { method: "POST", body: "{}" });
+        if (act === "po-cancel") await api("/api/po/" + id + "/cancel", { method: "POST", body: "{}" });
+        if (act === "po-close") await api("/api/po/" + id + "/close", { method: "POST", body: "{}" });
+        if (act === "asset-transfer") {
+          await api("/api/assets/" + id + "/transfer", {
+            method: "POST",
+            body: JSON.stringify({ custodianId: fieldValue("asset-custodian", id), location: fieldValue("asset-location", id) }),
+          });
+        }
+        if (act === "asset-retire") await api("/api/assets/" + id + "/retire", { method: "POST", body: "{}" });
         if (act === "expense") await api("/api/po/" + id + "/expense", { method: "POST", body: "{}" });
         if (act === "asset") {
           await api("/api/po/" + id + "/asset-card", {

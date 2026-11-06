@@ -12,6 +12,7 @@ import {
 import { isRole, type Role } from "../domain/roles.js";
 import {
   approvalBand,
+  currencyForCompany,
   prepayThresholdKey,
   reimburseThresholdKey,
   thresholdKey,
@@ -25,6 +26,8 @@ import {
 import type {
   AssetCard,
   AuditLog,
+  BudgetHold,
+  BudgetReleaseReason,
   ChaseOutcome,
   CompanyCode,
   CreatePrInput,
@@ -67,6 +70,8 @@ export interface ServiceDeps {
  * 状态以 docs/02、docs/03、docs/04、docs/06 为准。
  * SoD 在迁移前拒绝，不提供绕过。
  * Q5：require_pre_approval 固定为 true，没有配置开关。
+ * Q7：低值易耗仍走路径①。Q8：请购软占用，PO 硬占用，驳回/取消/关闭释放。
+ * S4：资产卡建卡人不得担任保管人。
  * 不做金蝶回写。入库仍走行政物资 stub。
  */
 export class ProcurementService {
@@ -173,8 +178,10 @@ export class ProcurementService {
     this.requireRole(actor, "applicant");
     const companyCode = this.company(input.companyCode);
     const currency = this.currency(input.currency);
+    this.assertCompanyCurrency(companyCode, currency);
     const deptId = this.requiredText(input.deptId, "部门");
     const purpose = this.requiredText(input.purpose, "事由");
+    const budgetId = this.budgetId(input.budgetId);
     if (!Array.isArray(input.lines) || input.lines.length < 1 || input.lines.length > 50) {
       this.fail("INVALID_LINES", "请购至少 1 行、至多 50 行");
     }
@@ -194,6 +201,7 @@ export class ProcurementService {
     });
     let amount = "0.00";
     for (const line of lines) amount = addAmount(amount, line.estAmount);
+    const docType = lines.every((line) => line.category === "low_value") ? "low_value" : "standard";
     const now = this.now();
     const id = this.store.nextId("PR");
     const pr: PurchaseRequisition = {
@@ -207,7 +215,7 @@ export class ProcurementService {
       deptId,
       purpose,
       capexHint: Boolean(input.capexHint),
-      budgetId: input.budgetId ?? null,
+      budgetId,
       reserveStatus: "none",
       deptApproverId: null,
       financeApproverId: null,
@@ -218,6 +226,7 @@ export class ProcurementService {
       rfqWaiverKind: null,
       rfqWaived: false,
       waiveReason: null,
+      docType,
       procurementClass: "admin_non_production",
       lines,
       createdAt: now,
@@ -242,6 +251,16 @@ export class ProcurementService {
     const pr = this.pr(prId);
     this.assertApplicant(actor, pr);
     this.assertStatus(pr.status, "draft", "请购");
+    this.openHold(actor, {
+      budgetId: pr.budgetId,
+      companyCode: pr.companyCode,
+      currency: pr.currency,
+      amount: pr.amount,
+      kind: "soft",
+      sourceEntity: "PR",
+      sourceId: pr.id,
+      linkedPrId: pr.id,
+    });
     pr.status = "submitted";
     pr.reserveStatus = "soft";
     pr.updatedAt = this.now();
@@ -265,14 +284,17 @@ export class ProcurementService {
     if (actor.id === pr.applicantId) {
       this.sod(actor, "PR", pr.id, pr.status, "S3", "S3 申请人不得担任部门审批人");
     }
-    const band = approvalBand(
-      pr.amount,
-      this.readThreshold(pr.currency, "fin"),
-      this.readThreshold(pr.currency, "ceo"),
-      thresholdKey(pr.currency, "fin"),
-      thresholdKey(pr.currency, "ceo"),
-    );
-    // 低额会立刻进入比价判断，阈值缺失时不能先改状态。
+    const lowValue = pr.docType === "low_value";
+    const band = lowValue
+      ? null
+      : approvalBand(
+          pr.amount,
+          this.readThreshold(pr.currency, "fin"),
+          this.readThreshold(pr.currency, "ceo"),
+          thresholdKey(pr.currency, "fin"),
+          thresholdKey(pr.currency, "ceo"),
+        );
+    // 低额会立刻进入比价判断，阈值缺失时不能先改状态。低值单据不读这三档。
     if (band === "low") this.readThreshold(pr.currency, "rfq");
     pr.deptApproverId = actor.id;
     pr.status = "dept_approved";
@@ -286,7 +308,27 @@ export class ProcurementService {
       comment: this.note("①-2 部门审批通过", comment),
       skipped: false,
     });
-    if (band === "low") {
+    if (lowValue) {
+      pr.financeGate = "skipped";
+      pr.ceoGate = "skipped";
+      this.skipGate(
+        pr,
+        actor,
+        "dept_approved",
+        "finance_approved",
+        "①-3 低值易耗按简化低额矩阵跳过财务加签",
+        "low_value_matrix",
+      );
+      this.skipGate(
+        pr,
+        actor,
+        "finance_approved",
+        "ceo_approved",
+        "①-4 低值易耗按简化低额矩阵跳过总经理",
+        "low_value_matrix",
+      );
+      this.enterSourcing(pr, actor, "dept_approved");
+    } else if (band === "low") {
       pr.financeGate = "skipped";
       pr.ceoGate = "skipped";
       this.skipGate(pr, actor, "dept_approved", "finance_approved", "①-3 未达财务阈，跳过");
@@ -310,8 +352,8 @@ export class ProcurementService {
     if (actor.id === pr.applicantId) {
       this.sod(actor, "PR", pr.id, pr.status, "S3", "S3 申请人不得担任部门审批人");
     }
+    this.releaseSoft(actor, pr, "pr_rejected");
     pr.status = "rejected";
-    pr.reserveStatus = "released";
     pr.deptApproverId = actor.id;
     pr.updatedAt = this.now();
     this.audit({
@@ -321,6 +363,82 @@ export class ProcurementService {
       toStatus: "rejected",
       actorId: actor.id,
       comment: this.note("①-2 部门驳回；释放软占用", comment),
+      skipped: false,
+    });
+    return clone(pr);
+  }
+
+  rejectFinance(actorId: string, prId: string, comment?: string): PurchaseRequisition {
+    const actor = this.requireUser(actorId);
+    const pr = this.pr(prId);
+    this.assertStatus(pr.status, "dept_approved", "请购");
+    if (pr.financeGate !== "required") this.fail("INVALID_STATE", "当前请购不需要财务加签", 409);
+    this.requireRole(actor, "finance");
+    this.releaseSoft(actor, pr, "pr_rejected");
+    pr.status = "rejected";
+    pr.financeApproverId = actor.id;
+    pr.updatedAt = this.now();
+    this.audit({
+      entity: "PR",
+      entityId: pr.id,
+      fromStatus: "dept_approved",
+      toStatus: "rejected",
+      actorId: actor.id,
+      comment: this.note("①-3 财务驳回；释放软占用", comment),
+      skipped: false,
+    });
+    return clone(pr);
+  }
+
+  rejectCeo(actorId: string, prId: string, comment?: string): PurchaseRequisition {
+    const actor = this.requireUser(actorId);
+    const pr = this.pr(prId);
+    this.assertStatus(pr.status, "finance_approved", "请购");
+    if (pr.ceoGate !== "required") this.fail("INVALID_STATE", "当前请购不需要总经理审批", 409);
+    this.requireRole(actor, "ceo");
+    this.releaseSoft(actor, pr, "pr_rejected");
+    pr.status = "rejected";
+    pr.ceoApproverId = actor.id;
+    pr.updatedAt = this.now();
+    this.audit({
+      entity: "PR",
+      entityId: pr.id,
+      fromStatus: "finance_approved",
+      toStatus: "rejected",
+      actorId: actor.id,
+      comment: this.note("①-4 总经理驳回；释放软占用", comment),
+      skipped: false,
+    });
+    return clone(pr);
+  }
+
+  cancelPr(actorId: string, prId: string): PurchaseRequisition {
+    const actor = this.requireUser(actorId);
+    const pr = this.pr(prId);
+    this.assertApplicant(actor, pr);
+    const open = [
+      "draft",
+      "submitted",
+      "dept_approved",
+      "finance_approved",
+      "ceo_approved",
+      "sourcing",
+      "ready_for_po",
+    ];
+    if (!open.includes(pr.status)) {
+      this.fail("INVALID_STATE", `请购状态是 ${pr.status}，不能取消`, 409);
+    }
+    const from = pr.status;
+    if (pr.reserveStatus === "soft") this.releaseSoft(actor, pr, "pr_cancelled");
+    pr.status = "cancelled";
+    pr.updatedAt = this.now();
+    this.audit({
+      entity: "PR",
+      entityId: pr.id,
+      fromStatus: from,
+      toStatus: "cancelled",
+      actorId: actor.id,
+      comment: from === "draft" ? "①-1 取消草稿" : "请购取消；释放软占用",
       skipped: false,
     });
     return clone(pr);
@@ -477,6 +595,8 @@ export class ProcurementService {
     const pr = this.pr(prId);
     this.requireRole(actor, "admin");
     this.assertStatus(pr.status, "ready_for_po", "请购");
+    const soft = this.openHoldOf("PR", pr.id, "soft");
+    if (!soft) this.fail("BUDGET_HOLD_MISSING", "请购没有可转为硬占用的软占用", 409);
     const terms = this.paymentTerms(input.paymentTerms);
     let days: number | null = null;
     if (terms === "monthly") {
@@ -544,6 +664,7 @@ export class ProcurementService {
     pr.status = "closed_converted";
     pr.reserveStatus = "hard";
     pr.updatedAt = now;
+    this.convertSoftToHard(actor, pr, po, soft);
     this.audit({
       entity: "PR",
       entityId: pr.id,
@@ -553,6 +674,40 @@ export class ProcurementService {
       comment: "请购转 PO；Q8 软占用转为硬占用",
       skipped: false,
     });
+    return clone(po);
+  }
+
+  cancelPo(actorId: string, poId: string): PurchaseOrder {
+    const actor = this.requireUser(actorId);
+    const po = this.po(poId);
+    this.requireRole(actor, "admin");
+    if (po.status !== "awaiting_receipt" && po.status !== "awaiting_prepay") {
+      this.fail("INVALID_STATE", "只有尚未收货、尚未付款的采购单可以取消", 409);
+    }
+    if (this.store.grnsByPo(po.id).length > 0) this.fail("INVALID_STATE", "已有收货记录，不能取消采购单", 409);
+    if (this.livePrepay(po.id)) this.fail("PREPAY_OPEN", "已有预付申请，不能取消采购单", 409);
+    this.releaseHard(actor, po, "po_cancelled");
+    const from = po.status;
+    po.status = "cancelled";
+    po.updatedAt = this.now();
+    this.audit({
+      entity: "PO",
+      entityId: po.id,
+      fromStatus: from,
+      toStatus: "cancelled",
+      actorId: actor.id,
+      comment: "采购单取消；Q8 释放硬占用",
+      skipped: false,
+    });
+    return clone(po);
+  }
+
+  closePaidPo(actorId: string, poId: string): PurchaseOrder {
+    const actor = this.requireUser(actorId);
+    const po = this.po(poId);
+    this.requireRole(actor, "admin");
+    this.assertStatus(po.status, "paid", "采购单");
+    this.closePo(po, actor, "采购单关闭；Q8 释放硬占用");
     return clone(po);
   }
 
@@ -574,6 +729,27 @@ export class ProcurementService {
     const result = this.receiptResult(input.result);
     if (result !== "rejected") this.readThreshold(po.currency, "capex");
     return this.confirmNewGrn(actor, po, qty, result, null);
+  }
+
+  /** Q7。低值易耗一次收完未收数量。仍是①-7，不是第三条路径。 */
+  receiveBatch(actorId: string, poId: string, input: { result: string }): Grn {
+    const actor = this.requireUser(actorId);
+    const po = this.po(poId);
+    const pr = this.pr(po.prId);
+    if (pr.docType !== "low_value") {
+      this.fail("LOW_VALUE_ONLY", "批量收货只用于低值易耗单据，仍走路径①", 409);
+    }
+    this.assertReceivable(po);
+    if (actor.id === po.issuerId) {
+      this.sod(actor, "PO", po.id, po.status, "S1", "S1 下单人不得验收（PO.issuer ≠ GRN.accepter）");
+    }
+    if (actor.id !== po.applicantId) {
+      this.fail("FORBIDDEN_ROLE", "①-7 默认由请购申请人验收", 403);
+    }
+    const result = this.receiptResult(input.result);
+    if (result !== "rejected") this.readThreshold(po.currency, "capex");
+    const qty = this.qtyOrRemaining(po, undefined);
+    return this.confirmNewGrn(actor, po, qty, result, null, `①-7 低值批量收货，结果 ${result}`);
   }
 
   openProxyReceipt(actorId: string, poId: string, input: { qtyReceived?: number }): Grn {
@@ -703,26 +879,35 @@ export class ProcurementService {
     if (po.status !== "fully_received") this.fail("INVALID_STATE", "须全部收货后才能建卡", 409);
     if (po.disposition !== "asset") this.fail("NOT_CAPEX", "D4 判定为费用化，不建资产卡", 409);
     if (po.dispositionDone) this.fail("INVALID_STATE", "资产卡已建立", 409);
-    const custodian = this.store.users.get(input.custodianId);
-    if (!custodian) this.fail("NOT_FOUND", "保管人不存在", 404);
+    const custodian = this.requireCustodian(input.custodianId);
     const location = this.requiredText(input.location, "存放位置");
-    const grn = this.confirmedGrns(po)[0];
+    if (custodian.id === actor.id) {
+      this.sod(actor, "PO", po.id, po.status, "S4", "S4 固资建卡人不得担任保管人（creator ≠ custodian）");
+    }
+    const grn = this.confirmedGrns(po).at(-1);
     if (!grn) this.fail("INVALID_STATE", "缺少已确认收货单", 409);
     const now = this.now();
     const id = this.store.nextId("AST");
+    const name = this.requiredText(input.name ?? po.lines[0]?.itemName ?? "资产", "资产名称");
     const card: AssetCard = {
       id,
       docNo: id,
+      companyCode: po.companyCode,
+      currency: po.currency,
+      amount: po.amount,
+      status: "active",
+      applicantId: po.applicantId,
+      createdAt: now,
+      updatedAt: now,
+      createdBy: actor.id,
       assetNo: id,
-      name: this.requiredText(input.name ?? po.lines[0]?.itemName ?? "资产", "资产名称"),
+      name,
       poId: po.id,
       grnId: grn.id,
       custodianId: custodian.id,
       location,
       creatorId: actor.id,
       capitalizedAmount: po.amount,
-      status: "active",
-      createdAt: now,
     };
     this.store.assets.set(card.id, card);
     po.dispositionDone = true;
@@ -733,7 +918,69 @@ export class ProcurementService {
       fromStatus: null,
       toStatus: "active",
       actorId: actor.id,
-      comment: "①-8a 固定资产建卡。S4 细则待定，本期不拦截建卡人与保管人",
+      comment: "①-8a 固定资产建卡。S4 建卡人与保管人分离",
+      skipped: false,
+    });
+    return clone(card);
+  }
+
+  getAsset(id: string): AssetCard {
+    const card = this.store.assets.get(id);
+    if (!card) this.fail("NOT_FOUND", "资产卡不存在", 404);
+    return clone(card);
+  }
+
+  transferAsset(
+    actorId: string,
+    assetId: string,
+    input: { custodianId: string; location: string },
+  ): AssetCard {
+    const actor = this.requireUser(actorId);
+    this.requireRole(actor, "admin");
+    const card = this.store.assets.get(assetId);
+    if (!card) this.fail("NOT_FOUND", "资产卡不存在", 404);
+    if (card.status === "retired") this.fail("INVALID_STATE", "已停用的资产卡不能调拨", 409);
+    const custodian = this.requireCustodian(input.custodianId);
+    const location = this.requiredText(input.location, "存放位置");
+    if (custodian.id === card.custodianId && location === card.location) {
+      this.fail("INVALID_STATE", "保管人与存放位置都没有变化", 409);
+    }
+    if (custodian.id === card.creatorId) {
+      this.sod(actor, "ASSET", card.id, card.status, "S4", "S4 固资建卡人不得担任保管人（creator ≠ custodian）");
+    }
+    const from = card.status;
+    card.custodianId = custodian.id;
+    card.location = location;
+    card.status = "transferred";
+    card.updatedAt = this.now();
+    this.audit({
+      entity: "ASSET",
+      entityId: card.id,
+      fromStatus: from,
+      toStatus: "transferred",
+      actorId: actor.id,
+      comment: `资产调拨，保管人 ${custodian.id}，位置 ${location}`,
+      skipped: false,
+    });
+    return clone(card);
+  }
+
+  retireAsset(actorId: string, assetId: string, comment?: string): AssetCard {
+    const actor = this.requireUser(actorId);
+    this.requireRole(actor, "admin");
+    const card = this.store.assets.get(assetId);
+    if (!card) this.fail("NOT_FOUND", "资产卡不存在", 404);
+    if (card.status === "retired") this.fail("INVALID_STATE", "资产卡已停用", 409);
+    const from = card.status;
+    card.status = "retired";
+    card.updatedAt = this.now();
+    this.audit({
+      entity: "ASSET",
+      entityId: card.id,
+      fromStatus: from,
+      toStatus: "retired",
+      actorId: actor.id,
+      comment: this.note("资产卡停用", comment),
       skipped: false,
     });
     return clone(card);
@@ -1815,6 +2062,7 @@ export class ProcurementService {
     this.requireRole(actor, "applicant");
     const companyCode = this.company(input.companyCode);
     const currency = this.currency(input.currency);
+    this.assertCompanyCurrency(companyCode, currency);
     const deptId = this.requiredText(input.deptId, "部门");
     const purpose = this.requiredText(input.purpose, "事由");
     const amount = formatStored(input.amount);
@@ -2263,6 +2511,7 @@ export class ProcurementService {
     pres: PreApproval[];
     expenses: ExpenseClaim[];
     assets: AssetCard[];
+    budgetHolds: BudgetHold[];
     audits: AuditLog[];
   } {
     return {
@@ -2280,8 +2529,9 @@ export class ProcurementService {
       reclaims: [...this.store.reclaims.values()].map((row) => clone(row)),
       pres: [...this.store.pres.values()].map((row) => clone(row)),
       expenses: [...this.store.expenses.values()].map((row) => clone(row)),
-      assets: [...this.store.assets.values()].map((row) => clone(row)),
-      audits: this.store.audits.map((row) => clone(row)),
+    assets: [...this.store.assets.values()].map((row) => clone(row)),
+    budgetHolds: [...this.store.budgetHolds.values()].map((row) => clone(row)),
+    audits: this.store.audits.map((row) => clone(row)),
     };
   }
 
@@ -2587,6 +2837,7 @@ export class ProcurementService {
   }
 
   private closePo(po: PurchaseOrder, actor: User, comment: string): void {
+    this.releaseHard(actor, po, "po_closed");
     const from = po.status;
     po.status = "closed";
     po.updatedAt = this.now();
@@ -2624,18 +2875,19 @@ export class ProcurementService {
   }
 
   private enterSourcing(pr: PurchaseRequisition, actor: User, fromStatus: PurchaseRequisition["status"]): void {
-    const rfq = this.readThreshold(pr.currency, "rfq");
-    const below = compareAmount(pr.amount, rfq) < 0;
-    const lowValueOnly = pr.lines.every((line) => line.category === "low_value");
-    if (below) {
-      pr.rfqRequired = false;
-      pr.rfqWaiverKind = "below_threshold";
-    } else if (lowValueOnly) {
+    if (pr.docType === "low_value") {
       pr.rfqRequired = false;
       pr.rfqWaiverKind = "low_value";
     } else {
-      pr.rfqRequired = true;
-      pr.rfqWaiverKind = null;
+      const rfq = this.readThreshold(pr.currency, "rfq");
+      const below = compareAmount(pr.amount, rfq) < 0;
+      if (below) {
+        pr.rfqRequired = false;
+        pr.rfqWaiverKind = "below_threshold";
+      } else {
+        pr.rfqRequired = true;
+        pr.rfqWaiverKind = null;
+      }
     }
     pr.status = "sourcing";
     pr.updatedAt = this.now();
@@ -2657,6 +2909,7 @@ export class ProcurementService {
     fromStatus: string,
     toStatus: string,
     comment: string,
+    skippedReason = "below_threshold",
   ): void {
     this.audit({
       entity: "PR",
@@ -2666,7 +2919,7 @@ export class ProcurementService {
       actorId: actor.id,
       comment,
       skipped: true,
-      skippedReason: "below_threshold",
+      skippedReason,
     });
   }
 
@@ -2707,6 +2960,7 @@ export class ProcurementService {
     qty: number,
     result: "accepted" | "concession" | "rejected",
     proxyReceiverId: string | null,
+    comment?: string,
   ): Grn {
     const now = this.now();
     const id = this.store.nextId("GRN");
@@ -2731,7 +2985,7 @@ export class ProcurementService {
       fromStatus: null,
       toStatus: grn.status,
       actorId: actor.id,
-      comment: `①-7 验收结果 ${result}`,
+      comment: comment ?? `①-7 验收结果 ${result}`,
       skipped: false,
     });
     if (grn.status === "confirmed") this.applyReceipt(po, actor);
@@ -2793,7 +3047,7 @@ export class ProcurementService {
     entity: AuditLog["entity"],
     entityId: string,
     status: string,
-    code: "S1" | "S2" | "S3" | "S5",
+    code: "S1" | "S2" | "S3" | "S4" | "S5",
     message: string,
   ): never {
     this.audit({
@@ -2859,6 +3113,151 @@ export class ProcurementService {
     const row = this.store.payments.get(id);
     if (!row) this.fail("NOT_FOUND", "付款单不存在", 404);
     return row;
+  }
+
+  private assertCompanyCurrency(companyCode: CompanyCode, currency: CurrencyCode): void {
+    const expected = currencyForCompany(companyCode);
+    if (currency !== expected) {
+      this.fail(
+        "COMPANY_CURRENCY_MISMATCH",
+        "SZ 使用 CNY 矩阵，HK 使用 HKD 矩阵。两套阈值独立配置，不能交叉",
+        422,
+      );
+    }
+  }
+
+  private budgetId(raw: string | null | undefined): string | null {
+    const text = (raw ?? "").trim();
+    if (!text) return null;
+    if (!/^[A-Za-z0-9_-]{1,40}$/.test(text)) {
+      this.fail("INVALID_BUDGET", "预算编号仅允许字母、数字、下划线和连字符");
+    }
+    return text;
+  }
+
+  private requireCustodian(id: string): User {
+    const custodian = this.store.users.get(id);
+    if (!custodian) this.fail("NOT_FOUND", "保管人不存在", 404);
+    if (custodian.status !== "active") this.fail("CUSTODIAN_INACTIVE", "保管人尚未启用", 422);
+    return custodian;
+  }
+
+  private openHoldOf(sourceEntity: "PR" | "PO", sourceId: string, kind: BudgetHold["kind"]): BudgetHold | undefined {
+    return this.store.budgetHoldsFor(sourceEntity, sourceId).find((row) => row.kind === kind && row.status === "open");
+  }
+
+  private openHold(
+    actor: User,
+    input: {
+      budgetId: string | null;
+      companyCode: CompanyCode;
+      currency: CurrencyCode;
+      amount: string;
+      kind: BudgetHold["kind"];
+      sourceEntity: "PR" | "PO";
+      sourceId: string;
+      linkedPrId: string;
+    },
+  ): BudgetHold {
+    if (this.openHoldOf(input.sourceEntity, input.sourceId, input.kind)) {
+      this.fail("BUDGET_HOLD_EXISTS", "该单据已有未释放的预算占用", 409);
+    }
+    const now = this.now();
+    const hold: BudgetHold = {
+      id: this.store.nextId("BDG"),
+      budgetId: input.budgetId,
+      companyCode: input.companyCode,
+      currency: input.currency,
+      amount: input.amount,
+      kind: input.kind,
+      status: "open",
+      sourceEntity: input.sourceEntity,
+      sourceId: input.sourceId,
+      linkedPrId: input.linkedPrId,
+      releasedAt: null,
+      releaseReason: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.store.budgetHolds.set(hold.id, hold);
+    this.audit({
+      entity: "BUDGET",
+      entityId: hold.id,
+      fromStatus: null,
+      toStatus: "open",
+      actorId: actor.id,
+      comment: input.kind === "soft" ? "Q8 软占用" : "Q8 硬占用",
+      skipped: false,
+    });
+    return hold;
+  }
+
+  private releaseSoft(actor: User, pr: PurchaseRequisition, reason: "pr_rejected" | "pr_cancelled"): void {
+    const hold = this.openHoldOf("PR", pr.id, "soft");
+    if (!hold) this.fail("BUDGET_HOLD_MISSING", "请购没有可释放的软占用", 409);
+    this.finishHold(actor, hold, "released", reason);
+    pr.reserveStatus = "released";
+    pr.updatedAt = this.now();
+  }
+
+  private convertSoftToHard(actor: User, pr: PurchaseRequisition, po: PurchaseOrder, soft: BudgetHold): void {
+    if (soft.status !== "open" || soft.kind !== "soft" || soft.sourceId !== pr.id) {
+      this.fail("BUDGET_HOLD_MISSING", "请购软占用状态已变化", 409);
+    }
+    this.finishHold(actor, soft, "converted", "converted_to_hard");
+    this.openHold(actor, {
+      budgetId: pr.budgetId,
+      companyCode: po.companyCode,
+      currency: po.currency,
+      amount: po.amount,
+      kind: "hard",
+      sourceEntity: "PO",
+      sourceId: po.id,
+      linkedPrId: pr.id,
+    });
+  }
+
+  private releaseHard(actor: User, po: PurchaseOrder, reason: "po_cancelled" | "po_closed"): void {
+    const hold = this.openHoldOf("PO", po.id, "hard");
+    if (!hold) {
+      if (po.reserveStatus === "released") return;
+      this.fail("BUDGET_HOLD_MISSING", "采购单没有可释放的硬占用", 409);
+    }
+    this.finishHold(actor, hold, "released", reason);
+    po.reserveStatus = "released";
+    po.updatedAt = this.now();
+    const pr = this.store.prs.get(po.prId);
+    if (pr) {
+      pr.reserveStatus = "released";
+      pr.updatedAt = po.updatedAt;
+    }
+  }
+
+  private finishHold(
+    actor: User,
+    hold: BudgetHold,
+    status: "released" | "converted",
+    reason: BudgetReleaseReason,
+  ): void {
+    const from = hold.status;
+    const now = this.now();
+    hold.status = status;
+    hold.releaseReason = reason;
+    hold.releasedAt = now;
+    hold.updatedAt = now;
+    this.audit({
+      entity: "BUDGET",
+      entityId: hold.id,
+      fromStatus: from,
+      toStatus: status,
+      actorId: actor.id,
+      comment: `Q8 ${reason}`,
+      skipped: false,
+    });
+  }
+
+  listBudgetHolds(): BudgetHold[] {
+    return [...this.store.budgetHolds.values()].map((row) => clone(row));
   }
 
   private company(raw: string): CompanyCode {

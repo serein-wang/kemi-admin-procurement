@@ -79,6 +79,17 @@ export type RefundMode = "refund" | "suspense";
 export type RefundStatus = "requested" | "finance_approved" | "executed";
 export type ReserveStatus = "none" | "soft" | "hard" | "released";
 export type RfqWaiverKind = "below_threshold" | "low_value";
+/** Q7。低值易耗仍走路径①，不另开第三路径。 */
+export type PrDocType = "standard" | "low_value";
+export type AssetStatus = "active" | "transferred" | "retired";
+export type BudgetHoldKind = "soft" | "hard";
+export type BudgetHoldStatus = "open" | "released" | "converted";
+export type BudgetReleaseReason =
+  | "pr_rejected"
+  | "pr_cancelled"
+  | "converted_to_hard"
+  | "po_cancelled"
+  | "po_closed";
 
 export interface User {
   id: string;
@@ -143,6 +154,8 @@ export interface PurchaseRequisition {
   rfqWaiverKind: RfqWaiverKind | null;
   rfqWaived: boolean;
   waiveReason: string | null;
+  /** 行全部为 low_value 时为低值易耗单据（Q7）。 */
+  docType: PrDocType;
   procurementClass: "admin_non_production";
   lines: PrLine[];
   createdAt: string;
@@ -191,7 +204,7 @@ export interface PurchaseOrder {
   dispositionDone: boolean;
   /** ①-8b stub 回执。无真实 erp-pro 调用。 */
   erpInboundRefs: string[];
-  reserveStatus: "hard";
+  reserveStatus: ReserveStatus;
   createdAt: string;
   updatedAt: string;
   createdBy: string;
@@ -264,20 +277,50 @@ export interface Payment {
   createdBy: string;
 }
 
+/**
+ * docs/06 资产卡草案字段，加单据公共头。
+ * S4：creatorId 不得等于 custodianId。基本流转为 active → transferred → retired。
+ */
 export interface AssetCard {
   id: string;
   docNo: string;
+  companyCode: CompanyCode;
+  currency: CurrencyCode;
+  /** 公共头金额，等于 capitalizedAmount。 */
+  amount: string;
+  status: AssetStatus;
+  /** 请购申请人。 */
+  applicantId: string;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
   assetNo: string;
   name: string;
   poId: string;
   grnId: string;
   custodianId: string;
   location: string;
-  /** S4 与保管人分离的细则待定，本期只记录不拦截。 */
+  /** S4 建卡人，必须与保管人分离。 */
   creatorId: string;
   capitalizedAmount: string;
-  status: "active";
+}
+
+/** Q8。请购软占用、采购单硬占用。驳回、取消或关闭时释放。不是金蝶预算。 */
+export interface BudgetHold {
+  id: string;
+  budgetId: string | null;
+  companyCode: CompanyCode;
+  currency: CurrencyCode;
+  amount: string;
+  kind: BudgetHoldKind;
+  status: BudgetHoldStatus;
+  sourceEntity: "PR" | "PO";
+  sourceId: string;
+  linkedPrId: string;
+  releasedAt: string | null;
+  releaseReason: BudgetReleaseReason | null;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface PrepayAttachment {
@@ -453,7 +496,8 @@ export interface AuditLog {
     | "CHASE"
     | "RECLAIM"
     | "PRE"
-    | "EXP";
+    | "EXP"
+    | "BUDGET";
   entityId: string;
   fromStatus: string | null;
   toStatus: string | null;
@@ -462,7 +506,7 @@ export interface AuditLog {
   comment: string;
   skipped: boolean;
   skippedReason?: string;
-  sodViolationCode?: "S1" | "S2" | "S3" | "S5";
+  sodViolationCode?: "S1" | "S2" | "S3" | "S4" | "S5";
 }
 
 export interface CreatePrInput {

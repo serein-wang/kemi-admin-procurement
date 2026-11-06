@@ -7,7 +7,7 @@
 | S1 | 下单人 ≠ 验收人 | `PO.issuer_id ≠ GRN.accepter_id`；保存/确认时硬校验 |
 | S2 | 记账人 ≠ 付款人 | 付款过账：`voucher.creator_id ≠ payment.payer_id`（①-13 / ②-8） |
 | S3 | 申请人 ≠ 部门审批人（禁自批） | 所有部门审批节点：`applicant_id ≠ dept_approver_id` |
-| S4 | 固资建卡与保管职责分离 | `AssetCard.creator_id` 与 `custodian_id` 分离规则 **待定**（源稿明确待定） |
+| S4 | 固资建卡与保管职责分离 | `AssetCard.creator_id ≠ custodian_id`。建卡与之后的调拨都硬校验。违反则 409，`sodViolationCode=S4`，不改卡、不改采购单处置。无管理员绕过（阶段 4 落定；源稿曾标细则待定） |
 | S5 | 预付申请人 ≠ 预付审批人 ≠ 预付付款人 | `PREPAY.applicant_id ≠ payment_approver_id ≠ payer_id` |
 
 违反 SoD：拒绝状态迁移，记录 `sod_violation_code`，不提供管理员一键绕过（若需紧急例外，另开「例外审批单」——**建议，待 Rock 确认，非源稿原文**）。

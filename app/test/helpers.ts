@@ -122,13 +122,23 @@ export async function call(
 export async function createSubmitted(
   app: FastifyInstance,
   applicant: Session,
-  input?: { qty?: number; estUnitPrice?: string; category?: string; currency?: string; purpose?: string },
+  input?: {
+    qty?: number;
+    estUnitPrice?: string;
+    category?: string;
+    currency?: string;
+    companyCode?: string;
+    purpose?: string;
+    budgetId?: string;
+  },
 ) {
+  const currency = input?.currency ?? "CNY";
   const created = await call(app, applicant, "POST", "/api/pr", {
-    companyCode: "SZ",
-    currency: input?.currency ?? "CNY",
+    companyCode: input?.companyCode ?? (currency === "HKD" ? "HK" : "SZ"),
+    currency,
     deptId: "D-ADMIN",
     purpose: input?.purpose ?? "会议室显示器",
+    budgetId: input?.budgetId ?? null,
     lines: [
       {
         itemName: "显示器",
