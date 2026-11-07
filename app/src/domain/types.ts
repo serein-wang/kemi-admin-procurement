@@ -558,7 +558,7 @@ export interface CreatePrInput {
     qty: number;
     estUnitPrice: string;
     category: string;
-    images?: Array<{ name?: string; dataUrl?: string }>;
+    images?: Array<{ id?: string; name?: string; dataUrl?: string }>;
   }>;
 }
 

@@ -246,6 +246,20 @@ export async function registerRoutes(
     return handle.service.getPr((request.params as { id: string }).id);
   });
 
+  app.post("/api/pr/:id/update", { bodyLimit: 14 * 1024 * 1024 }, async (request) => {
+    const session = requireSession(request);
+    const input = body(request);
+    return handle.service.updatePr(session.userId, (request.params as { id: string }).id, {
+      companyCode: input.companyCode === undefined ? undefined : text(input.companyCode),
+      currency: input.currency === undefined ? undefined : text(input.currency),
+      deptId: text(input.deptId),
+      purpose: text(input.purpose),
+      capexHint: input.capexHint === undefined ? undefined : Boolean(input.capexHint),
+      budgetId: input.budgetId === undefined ? undefined : typeof input.budgetId === "string" ? input.budgetId : null,
+      lines: Array.isArray(input.lines) ? input.lines as never : [],
+    });
+  });
+
   app.post("/api/pr/:id/submit", async (request) => {
     const session = requireSession(request);
     return handle.service.submitPr(session.userId, (request.params as { id: string }).id);
@@ -449,6 +463,26 @@ export async function registerRoutes(
     return handle.service.getPrepay((request.params as { id: string }).id);
   });
 
+  app.post("/api/prepay/:id/update", async (request) => {
+    const session = requireSession(request);
+    const input = body(request);
+    const proforma = input.proforma;
+    const proformaBody = proforma && typeof proforma === "object" && !Array.isArray(proforma)
+      ? proforma as Record<string, unknown>
+      : null;
+    return handle.service.updatePrepay(session.userId, (request.params as { id: string }).id, {
+      amount: text(input.amount),
+      contractNo: text(input.contractNo),
+      proforma: proformaBody
+        ? {
+            invoiceNo: text(proformaBody.invoiceNo),
+            amount: text(proformaBody.amount) || text(input.amount),
+            tax: text(proformaBody.tax) || "0.00",
+          }
+        : null,
+    });
+  });
+
   app.post("/api/prepay/:id/submit", async (request) => {
     const session = requireSession(request);
     return handle.service.submitPrepay(session.userId, (request.params as { id: string }).id);
@@ -594,6 +628,18 @@ export async function registerRoutes(
     return handle.service.getPreApproval((request.params as { id: string }).id);
   });
 
+  app.post("/api/pre/:id/update", async (request) => {
+    const session = requireSession(request);
+    const input = body(request);
+    return handle.service.updatePreApproval(session.userId, (request.params as { id: string }).id, {
+      companyCode: input.companyCode === undefined ? undefined : text(input.companyCode),
+      currency: input.currency === undefined ? undefined : text(input.currency),
+      deptId: text(input.deptId),
+      purpose: text(input.purpose),
+      amount: text(input.amount),
+    });
+  });
+
   app.post("/api/pre/:id/submit", async (request) => {
     const session = requireSession(request);
     return handle.service.submitPreApproval(session.userId, (request.params as { id: string }).id);
@@ -637,6 +683,17 @@ export async function registerRoutes(
   app.get("/api/exp/:id", async (request) => {
     requireSession(request);
     return handle.service.getExpense((request.params as { id: string }).id);
+  });
+
+  app.post("/api/exp/:id/update", async (request) => {
+    const session = requireSession(request);
+    const input = body(request);
+    return handle.service.updateExpense(session.userId, (request.params as { id: string }).id, {
+      purpose: text(input.purpose),
+      amount: text(input.amount),
+      invoiceNos: input.invoiceNos,
+      employeeAccount: text(input.employeeAccount),
+    });
   });
 
   app.post("/api/exp/:id/submit", async (request) => {
