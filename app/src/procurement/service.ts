@@ -1,6 +1,12 @@
 import { parseCategory } from "../domain/categories.js";
 import { DomainError } from "../domain/errors.js";
-import { decodeLineImages, imageExtension, type DecodedLineImage, type ImageMime } from "../domain/images.js";
+import {
+  decodeLineImages,
+  imageExtension,
+  MAX_LINE_IMAGES,
+  type DecodedLineImage,
+  type ImageMime,
+} from "../domain/images.js";
 import {
   addAmount,
   compareAmount,
@@ -186,35 +192,7 @@ export class ProcurementService {
     const deptId = this.requiredText(input.deptId, "部门");
     const purpose = this.requiredText(input.purpose, "事由");
     const budgetId = this.budgetId(input.budgetId);
-    if (!Array.isArray(input.lines) || input.lines.length < 1 || input.lines.length > 50) {
-      this.fail("INVALID_LINES", "请购至少 1 行、至多 50 行");
-    }
-    const prepared = input.lines.map((line) => {
-      const itemName = this.requiredText(line.itemName, "品名");
-      const category = parseCategory(line.category);
-      const qty = line.qty;
-      const estAmount = lineAmount(qty, line.estUnitPrice);
-      return {
-        itemName,
-        spec: this.lineNote(line.spec, "详细规格描述", 1000),
-        purchaseUrl: this.lineNote(line.purchaseUrl, "购买链接", 2000),
-        qty,
-        estUnitPrice: formatStored(line.estUnitPrice),
-        estAmount,
-        category,
-        decodedImages: decodeLineImages(line.images),
-      };
-    });
-    const lines: PrLine[] = prepared.map((line) => ({
-      itemName: line.itemName,
-      spec: line.spec,
-      purchaseUrl: line.purchaseUrl,
-      qty: line.qty,
-      estUnitPrice: line.estUnitPrice,
-      estAmount: line.estAmount,
-      category: line.category,
-      images: line.decodedImages.map((image) => this.storeLineImage(image)),
-    }));
+    const lines = this.buildPrLines(input.lines, new Map());
     let amount = "0.00";
     for (const line of lines) amount = addAmount(amount, line.estAmount);
     const docType = lines.every((line) => line.category === "low_value") ? "low_value" : "standard";
@@ -258,6 +236,58 @@ export class ProcurementService {
       toStatus: "draft",
       actorId: actor.id,
       comment: "①-1 创建请购草稿",
+      skipped: false,
+    });
+    return clone(pr);
+  }
+
+  /**
+   * 申请人修改草稿或已驳回请购。金额、品类、关卡和占用按创建时的初值重算，
+   * 驳回理由保留到重新提交成功。
+   */
+  updatePr(
+    actorId: string,
+    prId: string,
+    input: {
+      companyCode?: string;
+      currency?: string;
+      deptId: string;
+      purpose: string;
+      capexHint?: boolean;
+      budgetId?: string | null;
+      lines: CreatePrInput["lines"];
+    },
+  ): PurchaseRequisition {
+    const actor = this.requireUser(actorId);
+    const pr = this.pr(prId);
+    this.assertDocOwner(actor, pr.applicantId, "请购");
+    this.assertDraftOrRejected(pr.status, "请购");
+    this.assertSameCompanyCurrency(pr.companyCode, pr.currency, input.companyCode, input.currency);
+    const deptId = this.requiredText(input.deptId, "部门");
+    const purpose = this.requiredText(input.purpose, "事由");
+    const budgetId = input.budgetId === undefined ? pr.budgetId : this.budgetId(input.budgetId);
+    const retainable = this.imageIndex(pr.lines);
+    const previousIds = [...retainable.keys()];
+    const lines = this.buildPrLines(input.lines, retainable);
+    let amount = "0.00";
+    for (const line of lines) amount = addAmount(amount, line.estAmount);
+    pr.deptId = deptId;
+    pr.purpose = purpose;
+    pr.capexHint = input.capexHint === undefined ? pr.capexHint : Boolean(input.capexHint);
+    pr.budgetId = budgetId;
+    pr.lines = lines;
+    pr.amount = amount;
+    pr.docType = lines.every((line) => line.category === "low_value") ? "low_value" : "standard";
+    this.resetPrFinanceSnapshot(pr);
+    pr.updatedAt = this.now();
+    this.forgetImages(previousIds);
+    this.audit({
+      entity: "PR",
+      entityId: pr.id,
+      fromStatus: pr.status,
+      toStatus: pr.status,
+      actorId: actor.id,
+      comment: pr.status === "rejected" ? "①-1 按驳回意见修改请购，尚未重新提交" : "①-1 修改请购草稿",
       skipped: false,
     });
     return clone(pr);
@@ -1394,6 +1424,55 @@ export class ProcurementService {
     return clone(prepay);
   }
 
+  /**
+   * 预付申请人修改草稿或已驳回的预付。金额、关卡、比例按创建初值重算，
+   * 提交时再按新金额走阈值。驳回理由保留到重新提交成功。
+   */
+  updatePrepay(
+    actorId: string,
+    prepayId: string,
+    input: {
+      amount: string;
+      contractNo?: string | null;
+      proforma?: { invoiceNo: string; amount: string; tax?: string } | null;
+    },
+  ): PrepayRequest {
+    const actor = this.requireUser(actorId);
+    const prepay = this.prepay(prepayId);
+    this.assertDocOwner(actor, prepay.applicantId, "预付");
+    this.assertDraftOrRejected(prepay.status, "预付");
+    const po = this.po(prepay.poId);
+    if (po.paymentTerms !== "prepay") {
+      this.fail("PREPAY_TERMS_REQUIRED", "只有 D6=prepay 的采购单可以改预付", 409);
+    }
+    if (po.status !== "awaiting_prepay") this.fail("INVALID_STATE", "采购单不在待预付，不能修改预付", 409);
+    this.assertNoOtherLivePrepay(po.id, prepay.id);
+    const amount = formatStored(input.amount);
+    if (compareAmount(amount, "0.00") <= 0) this.fail("INVALID_AMOUNT", "预付金额必须大于 0");
+    if (compareAmount(amount, po.amount) > 0) this.fail("PREPAY_EXCEEDS_PO", "预付金额不能超过采购单金额", 422);
+    const contractNo = this.optionalText(input.contractNo, "合同号");
+    const proforma = input.proforma ?? null;
+    if (!contractNo && !proforma) {
+      this.fail("ATTACHMENT_REQUIRED", "预付必须关联采购单，并附合同或形式发票之一", 422);
+    }
+    this.syncPrepayProforma(actor, po, prepay, proforma);
+    prepay.amount = amount;
+    prepay.contractNo = contractNo;
+    this.rebuildPrepayAttachments(prepay, po);
+    this.resetPrepayFinanceSnapshot(prepay);
+    prepay.updatedAt = this.now();
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: prepay.status,
+      toStatus: prepay.status,
+      actorId: actor.id,
+      comment: prepay.status === "rejected" ? "①-P1 按驳回意见修改预付，尚未重新提交" : "①-P1 修改预付草稿",
+      skipped: false,
+    });
+    return clone(prepay);
+  }
+
   submitPrepay(actorId: string, prepayId: string): PrepayRequest {
     const actor = this.requireUser(actorId);
     const prepay = this.prepay(prepayId);
@@ -1401,6 +1480,7 @@ export class ProcurementService {
     if (actor.id !== prepay.applicantId) this.fail("FORBIDDEN_ROLE", "只有预付申请人可以提交", 403);
     const from = prepay.status;
     this.assertDraftOrRejected(from, "预付");
+    this.assertNoOtherLivePrepay(po.id, prepay.id);
     const contractLine = this.readPrepayMoney(po.currency, "contract");
     if (compareAmount(prepay.amount, contractLine) >= 0 && !prepay.contractNo) {
       this.fail("CONTRACT_REQUIRED", "预付额已达合同阈值，必须附合同", 422);
@@ -2139,6 +2219,38 @@ export class ProcurementService {
     return clone(pre);
   }
 
+  /** 申请人修改草稿或已驳回的事前申请。驳回理由保留到重新提交成功。 */
+  updatePreApproval(
+    actorId: string,
+    preId: string,
+    input: { companyCode?: string; currency?: string; deptId: string; purpose: string; amount: string },
+  ): PreApproval {
+    const actor = this.requireUser(actorId);
+    const pre = this.preApproval(preId);
+    this.assertDocOwner(actor, pre.applicantId, "事前");
+    this.assertDraftOrRejected(pre.status, "事前申请");
+    if (pre.consumedByExpenseId) this.fail("PRE_ALREADY_CONSUMED", "事前申请已被报销占用", 409);
+    this.assertSameCompanyCurrency(pre.companyCode, pre.currency, input.companyCode, input.currency);
+    const deptId = this.requiredText(input.deptId, "部门");
+    const purpose = this.requiredText(input.purpose, "事由");
+    const amount = formatStored(input.amount);
+    if (compareAmount(amount, "0.00") <= 0) this.fail("INVALID_AMOUNT", "事前金额必须大于 0");
+    pre.deptId = deptId;
+    pre.purpose = purpose;
+    pre.amount = amount;
+    pre.updatedAt = this.now();
+    this.audit({
+      entity: "PRE",
+      entityId: pre.id,
+      fromStatus: pre.status,
+      toStatus: pre.status,
+      actorId: actor.id,
+      comment: pre.status === "rejected" ? "②-1 按驳回意见修改事前申请，尚未重新提交" : "②-1 修改事前草稿",
+      skipped: false,
+    });
+    return clone(pre);
+  }
+
   submitPreApproval(actorId: string, preId: string): PreApproval {
     const actor = this.requireUser(actorId);
     const pre = this.preApproval(preId);
@@ -2293,6 +2405,43 @@ export class ProcurementService {
       toStatus: "draft",
       actorId: actor.id,
       comment: `②-4 创建报销草稿，关联 ${pre.docNo}`,
+      skipped: false,
+    });
+    return clone(expense);
+  }
+
+  /** 申请人修改草稿或已驳回报销。金额变更后财务关卡回到创建时的 pending。 */
+  updateExpense(
+    actorId: string,
+    expenseId: string,
+    input: { purpose: string; amount: string; invoiceNos: unknown; employeeAccount: string },
+  ): ExpenseClaim {
+    const actor = this.requireUser(actorId);
+    const expense = this.expense(expenseId);
+    this.assertDocOwner(actor, expense.applicantId, "报销");
+    this.assertDraftOrRejected(expense.status, "报销");
+    const purpose = this.requiredText(input.purpose, "事由");
+    const amount = formatStored(input.amount);
+    if (compareAmount(amount, "0.00") <= 0) this.fail("INVALID_AMOUNT", "报销金额必须大于 0");
+    const invoiceNos = this.invoiceNos(input.invoiceNos);
+    this.assertExpenseInvoicesFree(invoiceNos, expense.id);
+    const employeeAccount = this.accountNo(input.employeeAccount);
+    expense.purpose = purpose;
+    expense.amount = amount;
+    expense.invoiceNos = invoiceNos;
+    expense.employeeAccount = employeeAccount;
+    expense.deptApproverId = null;
+    expense.ticketCheckerId = null;
+    expense.financeCosignerId = null;
+    expense.financeGate = "pending";
+    expense.updatedAt = this.now();
+    this.audit({
+      entity: "EXP",
+      entityId: expense.id,
+      fromStatus: expense.status,
+      toStatus: expense.status,
+      actorId: actor.id,
+      comment: expense.status === "rejected" ? "②-4 按驳回意见修改报销，尚未重新提交" : "②-4 修改报销草稿",
       skipped: false,
     });
     return clone(expense);
@@ -2811,8 +2960,9 @@ export class ProcurementService {
   }
 
   /** 路径①与路径②的发票查重仍待财务确认，这里只拒绝未关闭报销之间的重号。 */
-  private assertExpenseInvoicesFree(invoiceNos: string[]): void {
+  private assertExpenseInvoicesFree(invoiceNos: string[], exceptId?: string): void {
     for (const expense of this.store.expenses.values()) {
+      if (exceptId && expense.id === exceptId) continue;
       if (expense.status === "rejected" || expense.status === "cancelled") continue;
       if (expense.invoiceNos.some((no) => invoiceNos.includes(no))) {
         this.fail("DUPLICATE_INVOICE", "发票号码已在其他报销单使用", 409);
@@ -3174,6 +3324,191 @@ export class ProcurementService {
 
   private assertApplicant(actor: User, pr: PurchaseRequisition): void {
     if (actor.id !== pr.applicantId) this.fail("FORBIDDEN_ROLE", "只有申请人本人可以提交该请购", 403);
+  }
+
+  private assertDocOwner(actor: User, ownerId: string, label: string): void {
+    if (actor.id !== ownerId) this.fail("FORBIDDEN_ROLE", `只有${label}申请人可以修改`, 403);
+  }
+
+  /** 编辑不更换公司或币种。省略则保持原值。 */
+  private assertSameCompanyCurrency(
+    companyCode: CompanyCode,
+    currency: CurrencyCode,
+    nextCompany: string | undefined,
+    nextCurrency: string | undefined,
+  ): void {
+    if (nextCurrency !== undefined && nextCurrency !== "" && nextCurrency !== currency) {
+      this.fail("INVALID_CURRENCY", "编辑不能更换币种");
+    }
+    if (nextCompany !== undefined && nextCompany !== "" && nextCompany !== companyCode) {
+      this.fail("INVALID_COMPANY", "编辑不能更换公司");
+    }
+  }
+
+  /** 修改草稿或驳回单时，关卡和占用回到创建初值，避免沿用上一轮金额的门禁。 */
+  private resetPrFinanceSnapshot(pr: PurchaseRequisition): void {
+    pr.deptApproverId = null;
+    pr.financeApproverId = null;
+    pr.ceoApproverId = null;
+    pr.financeGate = "pending";
+    pr.ceoGate = "pending";
+    pr.reserveStatus = "none";
+    pr.rfqRequired = null;
+    pr.rfqWaiverKind = null;
+    pr.rfqWaived = false;
+    pr.waiveReason = null;
+  }
+
+  private resetPrepayFinanceSnapshot(prepay: PrepayRequest): void {
+    prepay.deptApproverId = null;
+    prepay.financeCosignerId = null;
+    prepay.ceoApproverId = null;
+    prepay.financeGate = "pending";
+    prepay.ceoGate = "pending";
+    prepay.fullPrepay = false;
+    prepay.ratio = null;
+  }
+
+  private buildPrLines(rawLines: CreatePrInput["lines"], retainable: Map<string, PrLineImage>): PrLine[] {
+    if (!Array.isArray(rawLines) || rawLines.length < 1 || rawLines.length > 50) {
+      this.fail("INVALID_LINES", "请购至少 1 行、至多 50 行");
+    }
+    const seen = new Set<string>();
+    return rawLines.map((line) => {
+      const itemName = this.requiredText(line.itemName, "品名");
+      const category = parseCategory(line.category);
+      const qty = line.qty;
+      const estAmount = lineAmount(qty, line.estUnitPrice);
+      return {
+        itemName,
+        spec: this.lineNote(line.spec, "详细规格描述", 1000),
+        purchaseUrl: this.lineNote(line.purchaseUrl, "购买链接", 2000),
+        qty,
+        estUnitPrice: formatStored(line.estUnitPrice),
+        estAmount,
+        category,
+        images: this.resolveLineImages(line.images, retainable, seen),
+      };
+    });
+  }
+
+  private resolveLineImages(
+    raw: CreatePrInput["lines"][number]["images"],
+    retainable: Map<string, PrLineImage>,
+    seen: Set<string>,
+  ): PrLineImage[] {
+    if (raw == null) return [];
+    if (!Array.isArray(raw)) this.fail("INVALID_INPUT", "贴图格式不正确");
+    if (raw.length > MAX_LINE_IMAGES) {
+      this.fail("INVALID_INPUT", `每行最多 ${MAX_LINE_IMAGES} 张贴图`);
+    }
+    return raw.map((item) => {
+      const record = item && typeof item === "object" && !Array.isArray(item)
+        ? item as { id?: unknown; dataUrl?: unknown }
+        : null;
+      const id = record && typeof record.id === "string" ? record.id.trim() : "";
+      if (id && retainable.has(id)) {
+        if (seen.has(id)) this.fail("INVALID_INPUT", "同一张贴图不能重复引用");
+        seen.add(id);
+        const kept = retainable.get(id)!;
+        return { id: kept.id, mime: kept.mime, name: kept.name, byteLength: kept.byteLength };
+      }
+      const hasData = Boolean(record && typeof record.dataUrl === "string" && record.dataUrl.trim());
+      if (id && !hasData) this.fail("INVALID_INPUT", "不能引用不属于本请购的贴图");
+      const decoded = decodeLineImages([item]);
+      const stored = this.storeLineImage(decoded[0]!);
+      seen.add(stored.id);
+      return stored;
+    });
+  }
+
+  private imageIndex(lines: PrLine[]): Map<string, PrLineImage> {
+    const map = new Map<string, PrLineImage>();
+    for (const line of lines) {
+      for (const image of line.images) map.set(image.id, image);
+    }
+    return map;
+  }
+
+  /** 本单不再引用、且采购单也未引用的贴图从仓储删掉。 */
+  private forgetImages(candidates: string[]): void {
+    if (candidates.length === 0) return;
+    const live = new Set<string>();
+    const collect = (lines: PrLine[]) => {
+      for (const line of lines) {
+        for (const image of line.images) live.add(image.id);
+      }
+    };
+    for (const pr of this.store.prs.values()) collect(pr.lines);
+    for (const po of this.store.pos.values()) collect(po.lines);
+    for (const id of candidates) {
+      if (!live.has(id)) this.store.images.delete(id);
+    }
+  }
+
+  private syncPrepayProforma(
+    actor: User,
+    po: PurchaseOrder,
+    prepay: PrepayRequest,
+    proforma: { invoiceNo: string; amount: string; tax?: string } | null,
+  ): void {
+    if (!proforma) {
+      const existingId = prepay.proformaInvoiceId;
+      prepay.proformaInvoiceId = null;
+      if (existingId) this.removeProformaIfUnused(existingId, prepay.id);
+      return;
+    }
+    const invoiceNo = this.requiredText(proforma.invoiceNo, "形式发票号码");
+    const amount = formatStored(proforma.amount);
+    if (compareAmount(amount, "0.00") <= 0) this.fail("INVALID_AMOUNT", "形式发票金额必须大于 0");
+    const tax = formatStored(proforma.tax ?? "0.00");
+    const existingId = prepay.proformaInvoiceId;
+    const existing = existingId ? this.store.invoices.get(existingId) : undefined;
+    if (existing && existing.kind === "proforma") {
+      if (existing.invoiceNo !== invoiceNo) {
+        this.assertInvoiceNoFree(invoiceNo);
+        existing.invoiceNo = invoiceNo;
+      }
+      existing.amount = amount;
+      existing.tax = tax;
+      return;
+    }
+    prepay.proformaInvoiceId = this.addProforma(actor, po, { invoiceNo, amount, tax }, this.now());
+  }
+
+  private removeProformaIfUnused(invoiceId: string, exceptPrepayId: string): void {
+    for (const other of this.store.prepays.values()) {
+      if (other.id !== exceptPrepayId && other.proformaInvoiceId === invoiceId) return;
+    }
+    for (const invoice of this.store.invoices.values()) {
+      if (invoice.formalOf === invoiceId) return;
+    }
+    for (const match of this.store.matches.values()) {
+      if (match.invoiceId === invoiceId) return;
+    }
+    const invoice = this.store.invoices.get(invoiceId);
+    if (!invoice || invoice.kind !== "proforma") return;
+    this.store.invoices.delete(invoiceId);
+  }
+
+  /** 驳回单不占「未关闭预付」。重新打开前，同一采购单不能已有另一笔未关闭预付。 */
+  private assertNoOtherLivePrepay(poId: string, selfId: string): void {
+    for (const row of this.store.prepays.values()) {
+      if (row.id === selfId) continue;
+      if (row.poId === poId && row.status !== "rejected" && row.status !== "cancelled") {
+        this.fail("PREPAY_OPEN", "该采购单已有未关闭的预付申请", 409);
+      }
+    }
+  }
+
+  private rebuildPrepayAttachments(prepay: PrepayRequest, po: PurchaseOrder): void {
+    const attachments: PrepayAttachment[] = [{ kind: "po", ref: po.docNo }];
+    if (prepay.contractNo) attachments.push({ kind: "contract", ref: prepay.contractNo });
+    if (prepay.proformaInvoiceId) {
+      const stored = this.store.invoices.get(prepay.proformaInvoiceId);
+      if (stored) attachments.push({ kind: "proforma", ref: stored.invoiceNo });
+    }
+    prepay.attachments = attachments;
   }
 
   private assertStatus(actual: string, expected: string, label: string): void {

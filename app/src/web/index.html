@@ -224,6 +224,13 @@
       font-size: 13px;
       overflow-wrap: anywhere;
     }
+    .edit-line {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 8px 10px;
+      margin-top: 10px;
+    }
+    #edit-reject { margin-bottom: 8px; }
     .modal-backdrop {
       position: fixed;
       inset: 0;
@@ -436,6 +443,12 @@
     </section>
     <section>
       <div id="notice"></div>
+      <div class="card" id="edit-card" hidden>
+        <h2 id="edit-title">编辑单据</h2>
+        <div id="edit-reject" class="reject-reason" hidden></div>
+        <p id="edit-hint" class="hint">保存后单据仍停留在草稿或已驳回。提交或重新提交才会送审；驳回理由在重新提交成功后消失。</p>
+        <form id="edit-form"></form>
+      </div>
       <div class="card">
         <h2>待办事项</h2>
         <div id="todos" class="meta">登录并选择路径后显示你的待办。</div>
@@ -551,13 +564,14 @@
       return found ? found.displayName : id;
     }
 
-    function button(label, act, id, className) {
+    function button(label, act, id, className, entity) {
       const el = document.createElement("button");
       el.type = "button";
       el.textContent = label;
       el.dataset.act = act;
       el.dataset.id = id;
       if (className) el.className = className;
+      if (entity) el.dataset.entity = entity;
       return el;
     }
 
@@ -614,6 +628,7 @@
         actions.className = "row";
         if (row.queue === "applicant" && me.id === row.applicantId && (row.status === "draft" || row.status === "rejected")) {
           const again = row.status === "rejected";
+          actions.append(button("编辑", "edit", row.id, "ghost", row.entity));
           if (row.entity === "PR") actions.append(button(again ? "重新提交" : "提交", "submit", row.id));
           if (row.entity === "PREPAY") actions.append(button(again ? "重新提交" : "提交预付", "prepay-submit", row.id));
           if (row.entity === "PRE") actions.append(button(again ? "重新提交" : "提交事前", "pre-submit", row.id));
@@ -662,6 +677,7 @@
         const actions = document.createElement("div");
         actions.className = "row";
         if ((pr.status === "draft" || pr.status === "rejected") && me && me.id === pr.applicantId) {
+          actions.append(button("编辑", "edit", pr.id, "ghost", "PR"));
           actions.append(button(pr.status === "rejected" ? "重新提交" : "提交", "submit", pr.id));
         }
         if (["draft", "submitted", "dept_approved", "finance_approved", "ceo_approved", "sourcing", "ready_for_po"].includes(pr.status) && me && me.id === pr.applicantId) {
@@ -857,6 +873,7 @@
         const actions = document.createElement("div");
         actions.className = "row";
         if ((prepay.status === "draft" || prepay.status === "rejected") && me && me.id === prepay.applicantId) {
+          actions.append(button("编辑", "edit", prepay.id, "ghost", "PREPAY"));
           actions.append(button(prepay.status === "rejected" ? "重新提交" : "提交预付", "prepay-submit", prepay.id));
         }
         if (prepay.status === "submitted" && hasRole("dept")) {
@@ -997,6 +1014,7 @@
         const actions = document.createElement("div");
         actions.className = "row";
         if ((pre.status === "draft" || pre.status === "rejected") && me && me.id === pre.applicantId) {
+          actions.append(button("编辑", "edit", pre.id, "ghost", "PRE"));
           actions.append(button(pre.status === "rejected" ? "重新提交" : "提交事前", "pre-submit", pre.id));
         }
         if (pre.status === "submitted" && hasRole("dept")) {
@@ -1043,6 +1061,7 @@
         const actions = document.createElement("div");
         actions.className = "row";
         if ((expense.status === "draft" || expense.status === "rejected") && me && me.id === expense.applicantId) {
+          actions.append(button("编辑", "edit", expense.id, "ghost", "EXP"));
           actions.append(button(expense.status === "rejected" ? "重新提交" : "提交报销", "exp-submit", expense.id));
         }
         if (expense.status === "submitted" && hasRole("dept")) {
@@ -1209,10 +1228,12 @@
       }
       applyPathView();
       renderDocs();
+      syncEditOwner();
     }
 
     document.querySelector("#choose-company").addEventListener("click", () => {
       if (!me) return;
+      closeEdit();
       rememberPath("company");
       notice("", "");
       applyPathView();
@@ -1221,6 +1242,7 @@
 
     document.querySelector("#choose-reimburse").addEventListener("click", () => {
       if (!me) return;
+      closeEdit();
       rememberPath("reimburse");
       notice("", "");
       applyPathView();
@@ -1228,12 +1250,14 @@
     });
 
     document.querySelector("#change-path").addEventListener("click", () => {
+      closeEdit();
       rememberPath(null);
       notice("", "");
       applyPathView();
     });
 
     document.querySelector("#logout").addEventListener("click", async () => {
+      closeEdit();
       await api("/auth/logout", { method: "POST", body: "{}" });
       rememberPath(null);
       notice("", "");
@@ -1473,6 +1497,443 @@
       notice("error", "驳回理由窗口没有加载，请刷新页面后再试");
     }
 
+    let editState = null;
+    let editLines = [];
+    let editImageReads = 0;
+    let editEpoch = 0;
+
+    function findEditable(entity, id) {
+      if (!workspace || !entity || !id) return null;
+      const lists = {
+        PR: workspace.prs,
+        PRE: workspace.pres,
+        EXP: workspace.expenses,
+        PREPAY: workspace.prepays,
+      };
+      const rows = lists[entity] || [];
+      return rows.find((row) => row.id === id) || null;
+    }
+
+    function canEdit(doc) {
+      return Boolean(doc && me && me.id === doc.applicantId && (doc.status === "draft" || doc.status === "rejected"));
+    }
+
+    function closeEdit() {
+      editEpoch += 1;
+      for (const line of editLines) {
+        for (const image of line.images || []) {
+          if (!image.remote && image.objectUrl) URL.revokeObjectURL(image.objectUrl);
+        }
+      }
+      editLines = [];
+      editState = null;
+      editImageReads = 0;
+      const card = document.querySelector("#edit-card");
+      const form = document.querySelector("#edit-form");
+      const reason = document.querySelector("#edit-reject");
+      if (card) card.hidden = true;
+      if (form) form.replaceChildren();
+      if (reason) {
+        reason.hidden = true;
+        reason.textContent = "";
+      }
+    }
+
+    function syncEditOwner() {
+      if (!editState) return;
+      const doc = findEditable(editState.entity, editState.id);
+      if (!canEdit(doc)) closeEdit();
+    }
+
+    function editValue(field) {
+      const node = document.querySelector("#edit-fields [data-field='" + field + "']");
+      return node ? node.value : "";
+    }
+
+    function appendField(parent, labelText, control) {
+      const label = document.createElement("label");
+      label.textContent = labelText;
+      parent.append(label, control);
+    }
+
+    function textControl(value, opts) {
+      const input = document.createElement(opts.area ? "textarea" : "input");
+      if (!opts.area) {
+        input.type = opts.type || "text";
+        if (opts.min != null) input.min = String(opts.min);
+        if (opts.step) input.step = opts.step;
+      }
+      if (opts.max) input.maxLength = opts.max;
+      input.value = value == null ? "" : String(value);
+      if (opts.required) input.required = true;
+      input.dataset.field = opts.field;
+      if (opts.placeholder) input.placeholder = opts.placeholder;
+      return input;
+    }
+
+    function categoryControl(value) {
+      const select = document.createElement("select");
+      select.dataset.field = "category";
+      const options = [
+        ["consumable", "耗材 consumable"],
+        ["fixed_asset", "固资 fixed_asset"],
+        ["service", "服务 service"],
+        ["low_value", "低值 low_value"],
+      ];
+      for (const pair of options) {
+        const option = document.createElement("option");
+        option.value = pair[0];
+        option.textContent = pair[1];
+        if (pair[0] === value) option.selected = true;
+        select.append(option);
+      }
+      return select;
+    }
+
+    function syncPrLinesFromDom() {
+      const blocks = document.querySelectorAll("#edit-lines [data-edit-line]");
+      if (!blocks.length || blocks.length !== editLines.length) return;
+      blocks.forEach((block, index) => {
+        const line = editLines[index];
+        line.itemName = block.querySelector("[data-field=itemName]").value;
+        line.spec = block.querySelector("[data-field=spec]").value;
+        line.purchaseUrl = block.querySelector("[data-field=purchaseUrl]").value;
+        line.qty = block.querySelector("[data-field=qty]").value;
+        line.estUnitPrice = block.querySelector("[data-field=estUnitPrice]").value;
+        line.category = block.querySelector("[data-field=category]").value;
+      });
+    }
+
+    function renderEditLineImages(lineIndex) {
+      const box = document.querySelector("#edit-lines [data-edit-images='" + lineIndex + "']");
+      if (!box) return;
+      box.replaceChildren();
+      const line = editLines[lineIndex];
+      if (!line) return;
+      for (const item of line.images) {
+        const fig = document.createElement("figure");
+        const img = document.createElement("img");
+        img.alt = item.name || "贴图";
+        img.src = item.objectUrl;
+        const cap = document.createElement("figcaption");
+        cap.textContent = item.name || "贴图";
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "ghost";
+        remove.textContent = "移除";
+        remove.addEventListener("click", () => {
+          if (!item.remote && item.objectUrl) URL.revokeObjectURL(item.objectUrl);
+          const at = line.images.indexOf(item);
+          if (at >= 0) line.images.splice(at, 1);
+          renderEditLineImages(lineIndex);
+        });
+        fig.append(img, cap, remove);
+        box.append(fig);
+      }
+    }
+
+    function takeEditImages(lineIndex, fileList) {
+      const epoch = editEpoch;
+      const files = Array.from(fileList || []);
+      const line = editLines[lineIndex];
+      if (!line) return;
+      for (const file of files) {
+        if (!PR_IMAGE_TYPES.includes(file.type)) {
+          notice("error", "贴图仅支持 png、jpeg、gif、webp");
+          continue;
+        }
+        if (file.size > PR_IMAGE_BYTES) {
+          notice("error", "单张贴图不能超过 2MB");
+          continue;
+        }
+        if (line.images.length + editImageReads >= PR_IMAGE_LIMIT) {
+          notice("error", "每行最多 4 张贴图");
+          break;
+        }
+        const objectUrl = URL.createObjectURL(file);
+        editImageReads += 1;
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = typeof reader.result === "string" ? reader.result : "";
+          if (epoch !== editEpoch) {
+            URL.revokeObjectURL(objectUrl);
+            return;
+          }
+          editImageReads -= 1;
+          if (!dataUrl.startsWith("data:image/")) {
+            URL.revokeObjectURL(objectUrl);
+            notice("error", "贴图读取失败");
+            return;
+          }
+          line.images.push({ name: file.name || "image", dataUrl: dataUrl, objectUrl: objectUrl, remote: false });
+          renderEditLineImages(lineIndex);
+        };
+        reader.onerror = () => {
+          URL.revokeObjectURL(objectUrl);
+          if (epoch !== editEpoch) return;
+          editImageReads -= 1;
+          notice("error", "贴图读取失败");
+        };
+        reader.readAsDataURL(file);
+      }
+    }
+
+    function renderEditLines() {
+      const host = document.querySelector("#edit-lines");
+      if (!host) return;
+      host.replaceChildren();
+      editLines.forEach((line, index) => {
+        const block = document.createElement("div");
+        block.className = "edit-line";
+        block.dataset.editLine = String(index);
+        const heading = document.createElement("strong");
+        heading.textContent = "第 " + (index + 1) + " 行";
+        block.append(heading);
+        appendField(block, "品名", textControl(line.itemName, { field: "itemName", required: true, max: 200 }));
+        appendField(block, "品类", categoryControl(line.category));
+        appendField(block, "详细规格描述", textControl(line.spec, { field: "spec", area: true, max: 1000 }));
+        const zone = document.createElement("div");
+        zone.className = "dropzone";
+        zone.tabIndex = 0;
+        zone.textContent = "点击选择、拖入，或在此与规格框内粘贴图片。最多 4 张，每张 2MB。";
+        const file = document.createElement("input");
+        file.type = "file";
+        file.accept = "image/png,image/jpeg,image/gif,image/webp";
+        file.multiple = true;
+        file.hidden = true;
+        zone.addEventListener("click", () => file.click());
+        file.addEventListener("change", () => {
+          takeEditImages(index, file.files);
+          file.value = "";
+        });
+        zone.addEventListener("dragover", (event) => {
+          event.preventDefault();
+          zone.classList.add("over");
+        });
+        zone.addEventListener("dragleave", () => zone.classList.remove("over"));
+        zone.addEventListener("drop", (event) => {
+          event.preventDefault();
+          zone.classList.remove("over");
+          takeEditImages(index, event.dataTransfer && event.dataTransfer.files);
+        });
+        const onPaste = (event) => {
+          const files = imageFilesFromClipboard(event);
+          if (!files.length) return;
+          event.preventDefault();
+          takeEditImages(index, files);
+        };
+        zone.addEventListener("paste", onPaste);
+        const spec = block.querySelector("[data-field=spec]");
+        spec.addEventListener("paste", onPaste);
+        const preview = document.createElement("div");
+        preview.className = "thumbs";
+        preview.dataset.editImages = String(index);
+        appendField(block, "贴图", zone);
+        block.append(file, preview);
+        appendField(block, "购买链接", textControl(line.purchaseUrl, { field: "purchaseUrl", type: "url", max: 2000, placeholder: "https://" }));
+        appendField(block, "数量", textControl(line.qty, { field: "qty", type: "number", min: 1, step: "1", required: true }));
+        appendField(block, "预估单价", textControl(line.estUnitPrice, { field: "estUnitPrice", required: true }));
+        if (editLines.length > 1) {
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.className = "ghost";
+          remove.textContent = "删除此行";
+          remove.addEventListener("click", () => {
+            syncPrLinesFromDom();
+            const removed = editLines.splice(index, 1)[0];
+            for (const image of (removed && removed.images) || []) {
+              if (!image.remote && image.objectUrl) URL.revokeObjectURL(image.objectUrl);
+            }
+            renderEditLines();
+          });
+          block.append(remove);
+        }
+        host.append(block);
+        renderEditLineImages(index);
+      });
+    }
+
+    function openEdit(entity, id) {
+      const doc = findEditable(entity, id);
+      if (!canEdit(doc)) {
+        notice("error", "只有本人的草稿或已驳回单据可以编辑");
+        return;
+      }
+      closeEdit();
+      editState = { entity: entity, id: id };
+      const card = document.querySelector("#edit-card");
+      const title = document.querySelector("#edit-title");
+      const reasonBox = document.querySelector("#edit-reject");
+      const form = document.querySelector("#edit-form");
+      const titles = { PR: "编辑请购", PRE: "编辑事前申请", EXP: "编辑报销", PREPAY: "编辑预付" };
+      title.textContent = (titles[entity] || "编辑单据") + " · " + doc.docNo;
+      const reason = typeof doc.rejectReason === "string" ? doc.rejectReason.trim() : "";
+      if (reason) {
+        reasonBox.hidden = false;
+        reasonBox.textContent = "驳回理由：" + reason;
+      }
+      form.replaceChildren();
+      const fields = document.createElement("div");
+      fields.id = "edit-fields";
+      if (entity === "PR") {
+        appendField(fields, "事由", textControl(doc.purpose, { field: "purpose", required: true, max: 200 }));
+        appendField(fields, "部门", textControl(doc.deptId, { field: "deptId", required: true, max: 200 }));
+        editLines = (doc.lines || []).map((line) => ({
+          itemName: line.itemName || "",
+          spec: line.spec || "",
+          purchaseUrl: line.purchaseUrl || "",
+          qty: String(line.qty ?? ""),
+          estUnitPrice: line.estUnitPrice || "",
+          category: line.category || "consumable",
+          images: (line.images || []).map((image) => ({
+            id: image.id,
+            name: image.name || "贴图",
+            remote: true,
+            objectUrl: PREFIX + "/api/attachments/" + encodeURIComponent(image.id),
+          })),
+        }));
+        if (!editLines.length) {
+          editLines.push({ itemName: "", spec: "", purchaseUrl: "", qty: "1", estUnitPrice: "", category: "consumable", images: [] });
+        }
+      } else if (entity === "PRE") {
+        appendField(fields, "事由", textControl(doc.purpose, { field: "purpose", required: true, max: 200 }));
+        appendField(fields, "部门", textControl(doc.deptId, { field: "deptId", required: true, max: 200 }));
+        appendField(fields, "金额", textControl(doc.amount, { field: "amount", required: true }));
+      } else if (entity === "EXP") {
+        const linked = document.createElement("p");
+        linked.className = "meta";
+        linked.textContent = "关联事前 " + doc.preApprovalId + "。事前单本身不能在这里改。";
+        fields.append(linked);
+        appendField(fields, "事由", textControl(doc.purpose, { field: "purpose", required: true, max: 200 }));
+        appendField(fields, "金额", textControl(doc.amount, { field: "amount", required: true }));
+        appendField(fields, "发票号码", textControl((doc.invoiceNos || []).join(", "), { field: "invoices", required: true, placeholder: "多张用逗号分隔" }));
+        appendField(fields, "员工收款账户", textControl(doc.employeeAccount, { field: "account", required: true, max: 64 }));
+      } else if (entity === "PREPAY") {
+        let proformaNo = "";
+        if (doc.proformaInvoiceId) {
+          const invoice = (workspace.invoices || []).find((row) => row.id === doc.proformaInvoiceId);
+          if (invoice) proformaNo = invoice.invoiceNo;
+        }
+        const linked = document.createElement("p");
+        linked.className = "meta";
+        linked.textContent = "关联采购单 " + doc.poId + "。合同和形式发票至少保留一项。";
+        fields.append(linked);
+        appendField(fields, "预付金额", textControl(doc.amount, { field: "amount", required: true }));
+        appendField(fields, "合同号", textControl(doc.contractNo || "", { field: "contract", max: 200, placeholder: "可空" }));
+        appendField(fields, "形式发票号", textControl(proformaNo, { field: "proforma", max: 200, placeholder: "可空" }));
+      }
+      const linesHost = document.createElement("div");
+      linesHost.id = "edit-lines";
+      const actions = document.createElement("div");
+      actions.className = "row";
+      if (entity === "PR") {
+        const add = document.createElement("button");
+        add.type = "button";
+        add.className = "ghost";
+        add.textContent = "添加一行";
+        add.addEventListener("click", () => {
+          syncPrLinesFromDom();
+          if (editLines.length >= 50) {
+            notice("error", "请购至多 50 行");
+            return;
+          }
+          editLines.push({ itemName: "", spec: "", purchaseUrl: "", qty: "1", estUnitPrice: "", category: "consumable", images: [] });
+          renderEditLines();
+        });
+        actions.append(add);
+      }
+      const save = document.createElement("button");
+      save.type = "submit";
+      save.textContent = "保存修改";
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "ghost";
+      cancel.textContent = "取消编辑";
+      cancel.addEventListener("click", () => closeEdit());
+      actions.append(save, cancel);
+      form.append(fields, linesHost, actions);
+      if (entity === "PR") renderEditLines();
+      card.hidden = false;
+      card.scrollIntoView({ block: "nearest" });
+    }
+
+    function splitInvoiceNos(raw) {
+      return String(raw || "").split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean);
+    }
+
+    async function onEditSubmit(event) {
+      event.preventDefault();
+      if (!editState) return;
+      if (editImageReads > 0) {
+        notice("error", "贴图还在读取，请稍后再保存");
+        return;
+      }
+      const entity = editState.entity;
+      const id = editState.id;
+      try {
+        if (entity === "PR") {
+          syncPrLinesFromDom();
+          await api("/api/pr/" + id + "/update", {
+            method: "POST",
+            body: JSON.stringify({
+              deptId: editValue("deptId"),
+              purpose: editValue("purpose"),
+              lines: editLines.map((line) => ({
+                itemName: line.itemName,
+                spec: line.spec,
+                purchaseUrl: line.purchaseUrl,
+                qty: Number(line.qty),
+                estUnitPrice: String(line.estUnitPrice),
+                category: line.category,
+                images: (line.images || []).map((image) => (
+                  image.remote && image.id && !image.dataUrl
+                    ? { id: image.id, name: image.name }
+                    : { name: image.name, dataUrl: image.dataUrl }
+                )),
+              })),
+            }),
+          });
+        } else if (entity === "PRE") {
+          await api("/api/pre/" + id + "/update", {
+            method: "POST",
+            body: JSON.stringify({
+              deptId: editValue("deptId"),
+              purpose: editValue("purpose"),
+              amount: editValue("amount"),
+            }),
+          });
+        } else if (entity === "EXP") {
+          await api("/api/exp/" + id + "/update", {
+            method: "POST",
+            body: JSON.stringify({
+              purpose: editValue("purpose"),
+              amount: editValue("amount"),
+              invoiceNos: splitInvoiceNos(editValue("invoices")),
+              employeeAccount: editValue("account"),
+            }),
+          });
+        } else if (entity === "PREPAY") {
+          const amount = editValue("amount").trim();
+          const proformaNo = editValue("proforma").trim();
+          await api("/api/prepay/" + id + "/update", {
+            method: "POST",
+            body: JSON.stringify({
+              amount: amount,
+              contractNo: editValue("contract").trim(),
+              proforma: proformaNo ? { invoiceNo: proformaNo, amount: amount, tax: "0.00" } : null,
+            }),
+          });
+        }
+        closeEdit();
+        notice("ok", "已保存。提交或重新提交后，审批人看到的是修改后的内容");
+        await refresh();
+      } catch (error) {
+        notice("error", error.message);
+      }
+    }
+
+    document.querySelector("#edit-form").addEventListener("submit", onEditSubmit);
+
     document.body.addEventListener("click", async (event) => {
       const target = event.target.closest("[data-act]");
       if (!target) return;
@@ -1480,6 +1941,10 @@
       const act = target.dataset.act;
       if (REJECT_URL[act]) {
         openReject(REJECT_URL[act](id));
+        return;
+      }
+      if (act === "edit") {
+        openEdit(target.dataset.entity, id);
         return;
       }
       try {
