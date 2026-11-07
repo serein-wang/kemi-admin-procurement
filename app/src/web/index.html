@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>行政采购 · 阶段 4</title>
+  <title>行政采购 · 阶段 4 · 驳回需填理由</title>
   <style>
     /* Tokens from erp-pro public CSS (Element Plus + shell). Not from KEMI One Canvas. */
     :root {
@@ -570,6 +570,20 @@
       parent.append(box);
     }
 
+    /** 待办只带 queue，不带财务/总经理关卡。通过与驳回按队列映射到既有动作。 */
+    function todoDecision(row) {
+      const table = {
+        "PR:dept": ["dept-approve", "dept-reject"],
+        "PR:finance": ["finance-approve", "finance-reject"],
+        "PR:ceo": ["ceo-approve", "ceo-reject"],
+        "PREPAY:dept": ["prepay-dept", "prepay-dept-reject"],
+        "PRE:dept": ["pre-dept", "pre-dept-reject"],
+        "EXP:dept": ["exp-dept", "exp-dept-reject"],
+      };
+      if (!row || (row.queue !== "dept" && row.queue !== "finance" && row.queue !== "ceo")) return null;
+      return table[row.entity + ":" + row.queue] || null;
+    }
+
     function renderTodos() {
       todosEl.innerHTML = "";
       if (!me || !selectedPath) {
@@ -604,6 +618,11 @@
           if (row.entity === "PREPAY") actions.append(button(again ? "重新提交" : "提交预付", "prepay-submit", row.id));
           if (row.entity === "PRE") actions.append(button(again ? "重新提交" : "提交事前", "pre-submit", row.id));
           if (row.entity === "EXP") actions.append(button(again ? "重新提交" : "提交报销", "exp-submit", row.id));
+        }
+        const decision = todoDecision(row);
+        if (decision) {
+          actions.append(button("通过", decision[0], row.id));
+          actions.append(button("驳回", decision[1], row.id, "danger"));
         }
         if (actions.childElementCount) block.append(actions);
         wrap.append(block);
@@ -1392,49 +1411,67 @@
     const rejectModal = document.querySelector("#reject-modal");
     const rejectReasonEl = document.querySelector("#reject-reason");
     const rejectConfirm = document.querySelector("#reject-confirm");
+    const rejectCancel = document.querySelector("#reject-cancel");
+    const rejectForm = document.querySelector("#reject-form");
     let pendingRejectUrl = "";
 
     function syncRejectConfirm() {
+      if (!rejectConfirm || !rejectReasonEl) return;
       rejectConfirm.disabled = rejectReasonEl.value.trim().length === 0;
     }
 
     function openReject(url) {
+      if (!rejectModal || !rejectReasonEl) {
+        notice("error", "驳回理由窗口没有加载，请刷新页面后再试");
+        return;
+      }
+      if (!url) {
+        notice("error", "驳回地址缺失，请刷新页面后再试");
+        return;
+      }
       pendingRejectUrl = url;
       rejectReasonEl.value = "";
       syncRejectConfirm();
       rejectModal.hidden = false;
+      rejectModal.style.display = "grid";
       rejectReasonEl.focus();
     }
 
     function closeReject() {
       pendingRejectUrl = "";
+      if (!rejectModal) return;
       rejectModal.hidden = true;
+      rejectModal.style.display = "";
     }
 
-    rejectReasonEl.addEventListener("input", syncRejectConfirm);
-    document.querySelector("#reject-cancel").addEventListener("click", closeReject);
-    rejectModal.addEventListener("click", (event) => {
-      if (event.target === rejectModal) closeReject();
-    });
-    document.querySelector("#reject-form").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const reason = rejectReasonEl.value.trim();
-      if (!reason || !pendingRejectUrl) {
-        syncRejectConfirm();
-        notice("error", "请填写驳回理由");
-        return;
-      }
-      const url = pendingRejectUrl;
-      closeReject();
-      try {
-        await api(url, { method: "POST", body: JSON.stringify({ reason }) });
-        notice("ok", "已驳回，单据回到申请人待办");
-        await refresh();
-      } catch (error) {
-        notice("error", error.message);
-        await refresh();
-      }
-    });
+    if (rejectModal && rejectReasonEl && rejectConfirm && rejectCancel && rejectForm) {
+      rejectReasonEl.addEventListener("input", syncRejectConfirm);
+      rejectCancel.addEventListener("click", closeReject);
+      rejectModal.addEventListener("click", (event) => {
+        if (event.target === rejectModal) closeReject();
+      });
+      rejectForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const reason = rejectReasonEl.value.trim();
+        if (!reason || !pendingRejectUrl) {
+          syncRejectConfirm();
+          notice("error", "请填写驳回理由");
+          return;
+        }
+        const url = pendingRejectUrl;
+        closeReject();
+        try {
+          await api(url, { method: "POST", body: JSON.stringify({ reason }) });
+          notice("ok", "已驳回，单据回到申请人待办");
+          await refresh();
+        } catch (error) {
+          notice("error", error.message);
+          await refresh();
+        }
+      });
+    } else {
+      notice("error", "驳回理由窗口没有加载，请刷新页面后再试");
+    }
 
     document.body.addEventListener("click", async (event) => {
       const target = event.target.closest("[data-act]");

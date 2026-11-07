@@ -22,6 +22,44 @@ function findTodo(rows: TodoRow[], id: string): TodoRow | undefined {
   return rows.find((row) => row.id === id);
 }
 
+test("走查页不缓存；待办按 queue 给出通过和驳回，驳回先打开理由框", async () => {
+  const { app } = await boot();
+  try {
+    const page = await app.inject({ method: "GET", url: "/" });
+    assert.equal(page.statusCode, 200);
+    assert.match(String(page.headers["cache-control"] ?? ""), /no-store/);
+    const html = page.body;
+    assert.match(html, /id="reject-modal"/);
+    assert.match(html, /<textarea id="reject-reason"/);
+    assert.match(html, /驳回理由窗口没有加载，请刷新页面后再试/);
+    assert.match(html, /rejectModal\.hidden = false/);
+    assert.match(html, /rejectModal\.style\.display = "grid"/);
+    assert.match(html, /if \(REJECT_URL\[act\]\) \{\s*openReject\(REJECT_URL\[act\]\(id\)\);\s*return;\s*\}/);
+    assert.equal(html.includes("row.financeGate"), false);
+    assert.equal(html.includes("row.ceoGate"), false);
+    const decision = html.match(/function todoDecision\(row\) \{[\s\S]*?\n    \}/);
+    assert.ok(decision, "todoDecision missing");
+    const body = decision[0];
+    assert.match(body, /row\.queue !== "dept" && row\.queue !== "finance" && row\.queue !== "ceo"/);
+    assert.match(body, /"PR:dept": \["dept-approve", "dept-reject"\]/);
+    assert.match(body, /"PR:finance": \["finance-approve", "finance-reject"\]/);
+    assert.match(body, /"PR:ceo": \["ceo-approve", "ceo-reject"\]/);
+    assert.match(body, /"PREPAY:dept": \["prepay-dept", "prepay-dept-reject"\]/);
+    assert.match(body, /"PRE:dept": \["pre-dept", "pre-dept-reject"\]/);
+    assert.match(body, /"EXP:dept": \["exp-dept", "exp-dept-reject"\]/);
+    assert.equal(body.includes("financeGate"), false);
+    assert.equal(body.includes("ceoGate"), false);
+    const todos = html.match(/function renderTodos\(\) \{[\s\S]*?\n    \}/);
+    assert.ok(todos, "renderTodos missing");
+    assert.match(todos[0], /button\("通过", decision\[0\], row\.id\)/);
+    assert.match(todos[0], /button\("驳回", decision\[1\], row\.id, "danger"\)/);
+    assert.equal(todos[0].includes("financeGate"), false);
+    assert.equal(todos[0].includes("ceoGate"), false);
+  } finally {
+    await app.close();
+  }
+});
+
 test("驳回不填理由失败；填写后请购回到申请人待办且理由可读", async () => {
   const { app, handle } = await boot();
   try {

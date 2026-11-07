@@ -95,6 +95,7 @@ export async function registerRoutes(
   app.get("/health", async () => ({ ok: true, module: "admin-procurement", phase: 4, kingdeeWriteback: "deferred" }));
 
   app.get("/", async (_request, reply) => {
+    reply.header("Cache-Control", "no-store");
     return reply.type("text/html; charset=utf-8").send(page);
   });
 
