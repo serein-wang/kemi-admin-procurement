@@ -494,8 +494,11 @@
       "finance-reject": (id) => "/api/pr/" + id + "/finance-reject",
       "ceo-reject": (id) => "/api/pr/" + id + "/ceo-reject",
       "prepay-dept-reject": (id) => "/api/prepay/" + id + "/dept-reject",
+      "prepay-finance-reject": (id) => "/api/prepay/" + id + "/finance-reject",
+      "prepay-ceo-reject": (id) => "/api/prepay/" + id + "/ceo-reject",
       "pre-dept-reject": (id) => "/api/pre/" + id + "/dept-reject",
       "exp-dept-reject": (id) => "/api/exp/" + id + "/dept-reject",
+      "exp-ticket-reject": (id) => "/api/exp/" + id + "/ticket-reject",
     };
     try {
       const storedPath = sessionStorage.getItem("ap-path");
@@ -591,6 +594,8 @@
         "PR:finance": ["finance-approve", "finance-reject"],
         "PR:ceo": ["ceo-approve", "ceo-reject"],
         "PREPAY:dept": ["prepay-dept", "prepay-dept-reject"],
+        "PREPAY:finance": ["prepay-fin", "prepay-finance-reject"],
+        "PREPAY:ceo": ["prepay-ceo", "prepay-ceo-reject"],
         "PRE:dept": ["pre-dept", "pre-dept-reject"],
         "EXP:dept": ["exp-dept", "exp-dept-reject"],
       };
@@ -680,7 +685,7 @@
           actions.append(button("编辑", "edit", pr.id, "ghost", "PR"));
           actions.append(button(pr.status === "rejected" ? "重新提交" : "提交", "submit", pr.id));
         }
-        if (["draft", "submitted", "dept_approved", "finance_approved", "ceo_approved", "sourcing", "ready_for_po"].includes(pr.status) && me && me.id === pr.applicantId) {
+        if (["draft", "submitted", "dept_approved", "finance_approved", "ceo_approved", "sourcing", "ready_for_po", "rejected"].includes(pr.status) && me && me.id === pr.applicantId) {
           actions.append(button("取消请购", "pr-cancel", pr.id, "danger"));
         }
         if (pr.status === "submitted" && hasRole("dept")) {
@@ -875,6 +880,7 @@
         if ((prepay.status === "draft" || prepay.status === "rejected") && me && me.id === prepay.applicantId) {
           actions.append(button("编辑", "edit", prepay.id, "ghost", "PREPAY"));
           actions.append(button(prepay.status === "rejected" ? "重新提交" : "提交预付", "prepay-submit", prepay.id));
+          actions.append(button("取消预付", "prepay-cancel", prepay.id, "ghost"));
         }
         if (prepay.status === "submitted" && hasRole("dept")) {
           actions.append(button("部门通过", "prepay-dept", prepay.id));
@@ -882,9 +888,11 @@
         }
         if (prepay.status === "dept_approved" && prepay.financeGate === "required" && hasRole("finance")) {
           actions.append(button("财务加签", "prepay-fin", prepay.id));
+          actions.append(button("财务驳回", "prepay-finance-reject", prepay.id, "danger"));
         }
         if (prepay.status === "finance_cosigned" && prepay.ceoGate === "required" && hasRole("ceo")) {
           actions.append(button("总经理批准", "prepay-ceo", prepay.id));
+          actions.append(button("总经理驳回", "prepay-ceo-reject", prepay.id, "danger"));
         }
         const financeDone = prepay.financeGate === "skipped" || prepay.financeGate === "approved";
         const ceoDone = prepay.ceoGate === "skipped" || prepay.ceoGate === "approved";
@@ -1021,7 +1029,7 @@
           actions.append(button("事前通过", "pre-dept", pre.id));
           actions.append(button("驳回", "pre-dept-reject", pre.id, "danger"));
         }
-        if ((pre.status === "draft" || pre.status === "submitted" || pre.status === "approved") && me && me.id === pre.applicantId && !pre.consumedByExpenseId) {
+        if ((pre.status === "draft" || pre.status === "submitted" || pre.status === "approved" || pre.status === "rejected") && me && me.id === pre.applicantId && !pre.consumedByExpenseId) {
           actions.append(button("取消事前", "pre-cancel", pre.id, "ghost"));
         }
         if (pre.status === "approved" && me && me.id === pre.applicantId) {
@@ -1064,11 +1072,17 @@
           actions.append(button("编辑", "edit", expense.id, "ghost", "EXP"));
           actions.append(button(expense.status === "rejected" ? "重新提交" : "提交报销", "exp-submit", expense.id));
         }
+        if ((expense.status === "draft" || expense.status === "submitted" || expense.status === "rejected") && me && me.id === expense.applicantId) {
+          actions.append(button("取消报销", "exp-cancel", expense.id, "ghost"));
+        }
         if (expense.status === "submitted" && hasRole("dept")) {
           actions.append(button("部门通过", "exp-dept", expense.id));
           actions.append(button("驳回", "exp-dept-reject", expense.id, "danger"));
         }
-        if (expense.status === "dept_approved" && hasRole("finance")) actions.append(button("审票", "exp-ticket", expense.id));
+        if (expense.status === "dept_approved" && hasRole("finance")) {
+          actions.append(button("审票", "exp-ticket", expense.id));
+          actions.append(button("审票退回", "exp-ticket-reject", expense.id, "danger"));
+        }
         if (expense.status === "ticket_checked" && expense.financeGate === "required" && hasRole("finance")) {
           actions.append(button("超额加签", "exp-cosign", expense.id));
         }
@@ -2024,6 +2038,7 @@
           await api("/api/prepay/" + created.id + "/submit", { method: "POST", body: "{}" });
         }
         if (act === "prepay-submit") await api("/api/prepay/" + id + "/submit", { method: "POST", body: "{}" });
+        if (act === "prepay-cancel") await api("/api/prepay/" + id + "/cancel", { method: "POST", body: "{}" });
         if (act === "prepay-dept") await api("/api/prepay/" + id + "/dept-approve", { method: "POST", body: "{}" });
         if (act === "prepay-fin") await api("/api/prepay/" + id + "/finance-cosign", { method: "POST", body: "{}" });
         if (act === "prepay-ceo") await api("/api/prepay/" + id + "/ceo-approve", { method: "POST", body: "{}" });
@@ -2103,6 +2118,7 @@
           });
         }
         if (act === "exp-submit") await api("/api/exp/" + id + "/submit", { method: "POST", body: "{}" });
+        if (act === "exp-cancel") await api("/api/exp/" + id + "/cancel", { method: "POST", body: "{}" });
         if (act === "exp-dept") await api("/api/exp/" + id + "/dept-approve", { method: "POST", body: "{}" });
         if (act === "exp-ticket") await api("/api/exp/" + id + "/ticket-check", { method: "POST", body: "{}" });
         if (act === "exp-cosign") await api("/api/exp/" + id + "/finance-cosign", { method: "POST", body: "{}" });

@@ -488,6 +488,11 @@ export async function registerRoutes(
     return handle.service.submitPrepay(session.userId, (request.params as { id: string }).id);
   });
 
+  app.post("/api/prepay/:id/cancel", async (request) => {
+    const session = requireSession(request);
+    return handle.service.cancelPrepay(session.userId, (request.params as { id: string }).id);
+  });
+
   app.post("/api/prepay/:id/dept-approve", async (request) => {
     const session = requireSession(request);
     return handle.service.approvePrepayDept(
@@ -515,12 +520,30 @@ export async function registerRoutes(
     );
   });
 
+  app.post("/api/prepay/:id/finance-reject", async (request) => {
+    const session = requireSession(request);
+    return handle.service.rejectPrepayFinance(
+      session.userId,
+      (request.params as { id: string }).id,
+      rejectReason(request),
+    );
+  });
+
   app.post("/api/prepay/:id/ceo-approve", async (request) => {
     const session = requireSession(request);
     return handle.service.approvePrepayCeo(
       session.userId,
       (request.params as { id: string }).id,
       text(body(request).comment),
+    );
+  });
+
+  app.post("/api/prepay/:id/ceo-reject", async (request) => {
+    const session = requireSession(request);
+    return handle.service.rejectPrepayCeo(
+      session.userId,
+      (request.params as { id: string }).id,
+      rejectReason(request),
     );
   });
 
@@ -727,6 +750,15 @@ export async function registerRoutes(
   app.post("/api/exp/:id/ticket-check", async (request) => {
     const session = requireSession(request);
     return handle.service.checkExpenseTicket(session.userId, (request.params as { id: string }).id);
+  });
+
+  app.post("/api/exp/:id/ticket-reject", async (request) => {
+    const session = requireSession(request);
+    return handle.service.rejectExpenseTicket(
+      session.userId,
+      (request.params as { id: string }).id,
+      rejectReason(request),
+    );
   });
 
   app.post("/api/exp/:id/finance-cosign", async (request) => {

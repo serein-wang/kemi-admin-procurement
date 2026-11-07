@@ -480,6 +480,7 @@ export class ProcurementService {
       "ceo_approved",
       "sourcing",
       "ready_for_po",
+      "rejected",
     ];
     if (!open.includes(pr.status)) {
       this.fail("INVALID_STATE", `请购状态是 ${pr.status}，不能取消`, 409);
@@ -494,7 +495,11 @@ export class ProcurementService {
       fromStatus: from,
       toStatus: "cancelled",
       actorId: actor.id,
-      comment: from === "draft" ? "①-1 取消草稿" : "请购取消；释放软占用",
+      comment: from === "draft"
+        ? "①-1 取消草稿"
+        : from === "rejected"
+          ? "申请人取消已驳回请购"
+          : "请购取消；释放软占用",
       skipped: false,
     });
     return clone(pr);
@@ -1575,6 +1580,30 @@ export class ProcurementService {
     return clone(prepay);
   }
 
+  /** 财务关卡激活时驳回。低额已跳过财务的预付不能从这里退回。 */
+  rejectPrepayFinance(actorId: string, prepayId: string, comment?: string): PrepayRequest {
+    const actor = this.requireUser(actorId);
+    const prepay = this.prepay(prepayId);
+    this.assertStatus(prepay.status, "dept_approved", "预付");
+    if (prepay.financeGate !== "required") this.fail("INVALID_STATE", "当前预付不需要财务加签", 409);
+    this.requireRole(actor, "finance");
+    const reason = this.rejectReasonText(comment);
+    prepay.financeCosignerId = actor.id;
+    prepay.rejectReason = reason;
+    prepay.status = "rejected";
+    prepay.updatedAt = this.now();
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: "dept_approved",
+      toStatus: "rejected",
+      actorId: actor.id,
+      comment: this.note("①-P3 财务驳回", reason),
+      skipped: false,
+    });
+    return clone(prepay);
+  }
+
   approvePrepayFinance(actorId: string, prepayId: string, comment?: string): PrepayRequest {
     const actor = this.requireUser(actorId);
     const prepay = this.prepay(prepayId);
@@ -1617,6 +1646,59 @@ export class ProcurementService {
       toStatus: "ceo_approved",
       actorId: actor.id,
       comment: this.note("①-P4 总经理审批通过", comment),
+      skipped: false,
+    });
+    return clone(prepay);
+  }
+
+  /** 总经理关卡激活时驳回。未达总经理阈的预付不能从这里退回。 */
+  rejectPrepayCeo(actorId: string, prepayId: string, comment?: string): PrepayRequest {
+    const actor = this.requireUser(actorId);
+    const prepay = this.prepay(prepayId);
+    this.assertStatus(prepay.status, "finance_cosigned", "预付");
+    if (prepay.ceoGate !== "required") this.fail("INVALID_STATE", "当前预付不需要总经理审批", 409);
+    this.requireRole(actor, "ceo");
+    const reason = this.rejectReasonText(comment);
+    prepay.ceoApproverId = actor.id;
+    prepay.rejectReason = reason;
+    prepay.status = "rejected";
+    prepay.updatedAt = this.now();
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: "finance_cosigned",
+      toStatus: "rejected",
+      actorId: actor.id,
+      comment: this.note("①-P4 总经理驳回", reason),
+      skipped: false,
+    });
+    return clone(prepay);
+  }
+
+  /**
+   * 申请人取消草稿或已驳回预付。提交之后进入付款路径，不能再用取消退回。
+   * 未再被引用的形式发票一并删掉，发票号可以重新使用。
+   */
+  cancelPrepay(actorId: string, prepayId: string): PrepayRequest {
+    const actor = this.requireUser(actorId);
+    const prepay = this.prepay(prepayId);
+    if (actor.id !== prepay.applicantId) this.fail("FORBIDDEN_ROLE", "只有预付申请人可以取消", 403);
+    if (prepay.status !== "draft" && prepay.status !== "rejected") {
+      this.fail("INVALID_STATE", "当前预付不能取消", 409);
+    }
+    const from = prepay.status;
+    const invoiceId = prepay.proformaInvoiceId;
+    prepay.proformaInvoiceId = null;
+    if (invoiceId) this.removeProformaIfUnused(invoiceId, prepay.id);
+    prepay.status = "cancelled";
+    prepay.updatedAt = this.now();
+    this.audit({
+      entity: "PREPAY",
+      entityId: prepay.id,
+      fromStatus: from,
+      toStatus: "cancelled",
+      actorId: actor.id,
+      comment: from === "draft" ? "申请人取消预付草稿" : "申请人取消已驳回预付",
       skipped: false,
     });
     return clone(prepay);
@@ -2325,7 +2407,7 @@ export class ProcurementService {
     const actor = this.requireUser(actorId);
     const pre = this.preApproval(preId);
     if (actor.id !== pre.applicantId) this.fail("FORBIDDEN_ROLE", "只有事前申请人可以取消", 403);
-    if (pre.status !== "draft" && pre.status !== "submitted" && pre.status !== "approved") {
+    if (pre.status !== "draft" && pre.status !== "submitted" && pre.status !== "approved" && pre.status !== "rejected") {
       this.fail("INVALID_STATE", "当前事前申请不能取消", 409);
     }
     if (pre.consumedByExpenseId) this.fail("PRE_ALREADY_CONSUMED", "事前申请已被报销占用", 409);
@@ -2461,6 +2543,7 @@ export class ProcurementService {
     if (pre.applicantId !== expense.applicantId) {
       this.fail("PRE_NOT_APPROVED", "事前申请与报销申请人不一致", 409);
     }
+    this.assertExpenseInvoicesFree(expense.invoiceNos, expense.id);
     this.assertPreOpenForExpense(pre);
     this.consumePre(pre, expense.id, actor);
     if (from === "rejected") expense.deptApproverId = null;
@@ -2533,15 +2616,15 @@ export class ProcurementService {
     const actor = this.requireUser(actorId);
     const expense = this.expense(expenseId);
     if (actor.id !== expense.applicantId) this.fail("FORBIDDEN_ROLE", "只有报销申请人可以取消", 403);
-    if (expense.status !== "draft" && expense.status !== "submitted") {
+    if (expense.status !== "draft" && expense.status !== "submitted" && expense.status !== "rejected") {
       this.fail("INVALID_STATE", "当前报销不能取消", 409);
     }
     const from = expense.status;
     expense.status = "cancelled";
     expense.updatedAt = this.now();
-    if (from === "submitted") {
-      const pre = this.store.pres.get(expense.preApprovalId);
-      if (pre) this.releasePre(pre, actor, "报销取消，事前申请恢复为已批准");
+    const pre = this.store.pres.get(expense.preApprovalId);
+    if (pre && pre.consumedByExpenseId === expense.id) {
+      this.releasePre(pre, actor, "报销取消，事前申请恢复为已批准");
     }
     this.audit({
       entity: "EXP",
@@ -2589,6 +2672,35 @@ export class ProcurementService {
     } else {
       expense.financeGate = "required";
     }
+    return clone(expense);
+  }
+
+  /** 财务在审票时退回给申请人。事前占用释放，申请人可改完再提交。 */
+  rejectExpenseTicket(actorId: string, expenseId: string, comment?: string): ExpenseClaim {
+    const actor = this.requireUser(actorId);
+    const expense = this.expense(expenseId);
+    this.assertStatus(expense.status, "dept_approved", "报销");
+    this.requireRole(actor, "finance");
+    const reason = this.rejectReasonText(comment);
+    expense.rejectReason = reason;
+    expense.ticketCheckerId = null;
+    expense.financeCosignerId = null;
+    expense.financeGate = "pending";
+    expense.status = "rejected";
+    expense.updatedAt = this.now();
+    const pre = this.store.pres.get(expense.preApprovalId);
+    if (pre && pre.consumedByExpenseId === expense.id) {
+      this.releasePre(pre, actor, "报销被审票退回，事前申请恢复为已批准");
+    }
+    this.audit({
+      entity: "EXP",
+      entityId: expense.id,
+      fromStatus: "dept_approved",
+      toStatus: "rejected",
+      actorId: actor.id,
+      comment: this.note("②-6 财务审票退回", reason),
+      skipped: false,
+    });
     return clone(expense);
   }
 
@@ -2718,6 +2830,10 @@ export class ProcurementService {
         items.push(this.todoItem("PREPAY", prepay, "预付申请", "applicant"));
       } else if (roles.has("dept") && prepay.status === "submitted" && prepay.applicantId !== actor.id) {
         items.push(this.todoItem("PREPAY", prepay, "预付申请", "dept"));
+      } else if (roles.has("finance") && prepay.status === "dept_approved" && prepay.financeGate === "required") {
+        items.push(this.todoItem("PREPAY", prepay, "预付申请", "finance"));
+      } else if (roles.has("ceo") && prepay.status === "finance_cosigned" && prepay.ceoGate === "required") {
+        items.push(this.todoItem("PREPAY", prepay, "预付申请", "ceo"));
       }
     }
     for (const pre of this.store.pres.values()) {
@@ -2959,11 +3075,14 @@ export class ProcurementService {
     return nos;
   }
 
-  /** 路径①与路径②的发票查重仍待财务确认，这里只拒绝未关闭报销之间的重号。 */
+  /**
+   * 未取消的报销占住发票号，已驳回仍然占用，只有取消后才释放。校验时排除本单。
+   * 路径①进项票与路径②报销票的跨路径查重仍待财务确认，这里只查报销单。
+   */
   private assertExpenseInvoicesFree(invoiceNos: string[], exceptId?: string): void {
     for (const expense of this.store.expenses.values()) {
       if (exceptId && expense.id === exceptId) continue;
-      if (expense.status === "rejected" || expense.status === "cancelled") continue;
+      if (expense.status === "cancelled") continue;
       if (expense.invoiceNos.some((no) => invoiceNos.includes(no))) {
         this.fail("DUPLICATE_INVOICE", "发票号码已在其他报销单使用", 409);
       }
