@@ -84,7 +84,9 @@ export async function registerRoutes(
   }
 
   function text(value: unknown): string {
-    return typeof value === "string" ? value : "";
+    if (typeof value === "string") return value;
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+    return "";
   }
 
   function rejectReason(request: FastifyRequest): string {
