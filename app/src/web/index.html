@@ -890,6 +890,72 @@
       todosEl.append(wrap);
     }
 
+    /** 单据 id 已在当前待办里时，下方单据卡片不再重复动作和驳回理由。 */
+    function docListedInTodos(rows, id) {
+      if (!id) return false;
+      for (const row of rows || []) {
+        if (row && row.id === id) return true;
+      }
+      return false;
+    }
+
+    function compactDocLine(kind, doc) {
+      if (!doc) return "";
+      if (kind === "PR") return prLineDetail(doc.lines);
+      if (kind === "PREPAY") {
+        const contract = typeof doc.contractNo === "string" ? doc.contractNo.trim() : "";
+        return contract ? "合同 " + contract : "";
+      }
+      if (kind === "EXP") {
+        const bits = [];
+        const purpose = typeof doc.purpose === "string" ? doc.purpose.trim() : "";
+        if (purpose) bits.push(purpose);
+        const invoices = Array.isArray(doc.invoiceNos) ? doc.invoiceNos.filter(Boolean) : [];
+        if (invoices.length) bits.push("发票 " + invoices.join(","));
+        return bits.join(" · ");
+      }
+      return "";
+    }
+
+    /**
+     * 待办已列出的单据：单号、标题、金额、中文状态、明细摘要。
+     * 不放驳回条，也不放按钮；处理留在上方待办。
+     */
+    function renderCompactDoc(kind, doc) {
+      const labels = { PR: "请购", PREPAY: "预付", PRE: "事前", EXP: "报销" };
+      const kindLabel = labels[kind] || kind;
+      const amount = doc.amount + " " + doc.currency;
+      const block = document.createElement("div");
+      block.className = "doc";
+      block.dataset.compact = "todo";
+      block.dataset.id = doc.id;
+      const title = document.createElement("strong");
+      if (kind === "PR") title.textContent = doc.docNo + " · " + doc.purpose + " · " + amount;
+      else if (kind === "PREPAY") title.textContent = doc.docNo + " · 预付 " + amount;
+      else if (kind === "PRE") title.textContent = doc.docNo + " · 事前 " + amount + " · " + doc.purpose;
+      else if (kind === "EXP") title.textContent = doc.docNo + " · 报销 " + amount;
+      else title.textContent = doc.docNo + " · " + amount;
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.dataset.status = "label";
+      meta.textContent = kindLabel + " · " + statusLabel(doc.status);
+      block.append(title, meta);
+      const line = compactDocLine(kind, doc);
+      if (line) {
+        const detail = document.createElement("div");
+        detail.className = "meta";
+        detail.dataset.line = "summary";
+        detail.textContent = line;
+        block.append(detail);
+      }
+      const hint = document.createElement("div");
+      hint.className = "meta";
+      hint.dataset.todoHint = "1";
+      hint.textContent = "处理请用上方待办";
+      block.append(hint);
+      return block;
+    }
+
     function renderDocs() {
       renderTodos();
       docsEl.innerHTML = "";
@@ -916,6 +982,10 @@
         wrap.append(tools);
       }
       for (const pr of selectedPath === "company" ? workspace.prs : []) {
+        if (docListedInTodos(todos, pr.id)) {
+          mountDoc("PR", pr.status, renderCompactDoc("PR", pr));
+          continue;
+        }
         const block = document.createElement("div");
         block.className = "doc";
         const title = document.createElement("strong");
@@ -1114,6 +1184,10 @@
         mountDoc("ASSET", card.status, block);
       }
       for (const prepay of selectedPath === "company" ? (workspace.prepays || []) : []) {
+        if (docListedInTodos(todos, prepay.id)) {
+          mountDoc("PREPAY", prepay.status, renderCompactDoc("PREPAY", prepay));
+          continue;
+        }
         const block = document.createElement("div");
         block.className = "doc";
         const title = document.createElement("strong");
@@ -1271,6 +1345,10 @@
         mountDoc("PAY", pay.status, block);
       }
       for (const pre of selectedPath === "reimburse" ? (workspace.pres || []) : []) {
+        if (docListedInTodos(todos, pre.id)) {
+          mountDoc("PRE", pre.status, renderCompactDoc("PRE", pre));
+          continue;
+        }
         const block = document.createElement("div");
         block.className = "doc";
         const title = document.createElement("strong");
@@ -1316,6 +1394,10 @@
         mountDoc("PRE", pre.status, block);
       }
       for (const expense of selectedPath === "reimburse" ? (workspace.expenses || []) : []) {
+        if (docListedInTodos(todos, expense.id)) {
+          mountDoc("EXP", expense.status, renderCompactDoc("EXP", expense));
+          continue;
+        }
         const block = document.createElement("div");
         block.className = "doc";
         const title = document.createElement("strong");
