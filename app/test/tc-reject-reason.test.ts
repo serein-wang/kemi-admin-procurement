@@ -22,6 +22,29 @@ function findTodo(rows: TodoRow[], id: string): TodoRow | undefined {
   return rows.find((row) => row.id === id);
 }
 
+function loadPageFn(html: string, name: string): (...args: never[]) => unknown {
+  const marker = `function ${name}(`;
+  const start = html.indexOf(marker);
+  assert.ok(start >= 0, name);
+  const open = html.indexOf("{", start);
+  let depth = 0;
+  let end = -1;
+  for (let i = open; i < html.length; i += 1) {
+    const ch = html[i];
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        end = i;
+        break;
+      }
+    }
+  }
+  assert.ok(end > open, name);
+  const source = html.slice(start, end + 1);
+  return new Function(`${source}\nreturn ${name};`)() as (...args: never[]) => unknown;
+}
+
 test("走查页不缓存；待办按 queue 给出通过和驳回，驳回先打开理由框", async () => {
   const { app } = await boot();
   try {
@@ -51,10 +74,70 @@ test("走查页不缓存；待办按 queue 给出通过和驳回，驳回先打�
     assert.equal(body.includes("ceoGate"), false);
     const todos = html.match(/function renderTodos\(\) \{[\s\S]*?\n    \}/);
     assert.ok(todos, "renderTodos missing");
-    assert.match(todos[0], /button\("通过", decision\[0\], row\.id\)/);
-    assert.match(todos[0], /button\("驳回", decision\[1\], row\.id, "danger"\)/);
+    assert.match(todos[0], /splitTodos\(todos, selectedPath\)/);
+    assert.match(todos[0], /todoEmptyLines\(split, returnedHint\)/);
     assert.equal(todos[0].includes("financeGate"), false);
     assert.equal(todos[0].includes("ceoGate"), false);
+    const card = html.match(/function renderTodoCard\(row\) \{[\s\S]*?\n    \}/);
+    assert.ok(card, "renderTodoCard missing");
+    assert.match(card[0], /button\("通过", decision\[0\], row\.id\)/);
+    assert.match(card[0], /button\("驳回", decision\[1\], row\.id, "danger"\)/);
+    assert.match(card[0], /button\("编辑", "edit", row\.id, "ghost", row\.entity\)/);
+    assert.match(card[0], /重新提交/);
+    assert.match(card[0], /appendRejectReason\(block, row\)/);
+    assert.equal(card[0].includes("financeGate"), false);
+    assert.equal(card[0].includes("ceoGate"), false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("另一路径的驳回和草稿仍出现在待办，驳回人看到单据回到申请人", async () => {
+  const { app } = await boot();
+  try {
+    const page = await app.inject({ method: "GET", url: "/" });
+    assert.equal(page.statusCode, 200);
+    const html = page.body;
+    const splitTodos = loadPageFn(html, "splitTodos") as (
+      rows: Array<{ entity: string; id: string; queue: string; status: string }>,
+      selectedPath: string,
+    ) => { onPath: Array<{ id: string }>; heldOffPath: Array<{ id: string }> };
+    const todoEmptyLines = loadPageFn(html, "todoEmptyLines") as (
+      split: { onPath: unknown[]; heldOffPath: unknown[] },
+      showReturnedHint: boolean,
+    ) => string[];
+
+    const rejectedPre = { entity: "PRE", id: "PRE-1", queue: "applicant", status: "rejected" };
+    const draftPr = { entity: "PR", id: "PR-1", queue: "applicant", status: "draft" };
+    const submittedPr = { entity: "PR", id: "PR-2", queue: "dept", status: "submitted" };
+    const onCompany = splitTodos([rejectedPre, draftPr, submittedPr], "company");
+    assert.deepEqual(onCompany.onPath.map((row) => row.id), ["PR-1", "PR-2"]);
+    assert.deepEqual(onCompany.heldOffPath.map((row) => row.id), ["PRE-1"]);
+    assert.deepEqual(todoEmptyLines(onCompany, false), []);
+
+    const onlyOther = splitTodos([rejectedPre], "company");
+    assert.deepEqual(onlyOther.onPath, []);
+    assert.equal(onlyOther.heldOffPath.length, 1);
+    assert.deepEqual(todoEmptyLines(onlyOther, false), [
+      "当前路径没有待办；你还有 1 条驳回/草稿在另一路径（点返回重选路径）。",
+    ]);
+
+    const approver = splitTodos([], "company");
+    assert.deepEqual(todoEmptyLines(approver, true), ["没有待办。", "驳回后单据回到申请人待办。"]);
+    assert.deepEqual(todoEmptyLines(approver, false), ["没有待办。"]);
+
+    const onReimburse = splitTodos([draftPr, rejectedPre], "reimburse");
+    assert.deepEqual(onReimburse.onPath.map((row) => row.id), ["PRE-1"]);
+    assert.deepEqual(onReimburse.heldOffPath.map((row) => row.id), ["PR-1"]);
+    const hiddenQueue = splitTodos([submittedPr], "reimburse");
+    assert.deepEqual(hiddenQueue.onPath, []);
+    assert.deepEqual(hiddenQueue.heldOffPath, []);
+    assert.deepEqual(todoEmptyLines(hiddenQueue, false), ["没有待办。"]);
+
+    assert.match(html, /act === "switch-path"/);
+    assert.match(html, /切到" \+ otherPathName\(selectedPath\)/);
+    assert.match(html, /showReturnedHint = true/);
+    assert.match(html, /appendRejectReason\(block, row\)/);
   } finally {
     await app.close();
   }

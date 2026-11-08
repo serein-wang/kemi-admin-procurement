@@ -13,6 +13,7 @@ import {
   formatRatio,
   lineAmount,
   parseAmount,
+  parseQty,
   subtractAmount,
   withinRatio,
 } from "../domain/money.js";
@@ -3070,7 +3071,7 @@ export class ProcurementService {
     if (!Array.isArray(raw) || raw.length < 1 || raw.length > 20) {
       this.fail("INVALID_INPUT", "报销至少 1 张、至多 20 张发票");
     }
-    const nos = raw.map((item) => this.requiredText(typeof item === "string" ? item : "", "发票号码"));
+    const nos = raw.map((item) => this.requiredText(item, "发票号码"));
     if (new Set(nos).size !== nos.length) this.fail("DUPLICATE_INVOICE", "报销单内发票号码重复", 409);
     return nos;
   }
@@ -3496,7 +3497,7 @@ export class ProcurementService {
     return rawLines.map((line) => {
       const itemName = this.requiredText(line.itemName, "品名");
       const category = parseCategory(line.category);
-      const qty = line.qty;
+      const qty = parseQty(line.qty);
       const estAmount = lineAmount(qty, line.estUnitPrice);
       return {
         itemName,
@@ -3896,8 +3897,12 @@ export class ProcurementService {
     this.fail("INVALID_CURRENCY", "币种仅为 CNY 或 HKD");
   }
 
-  private requiredText(raw: string, label: string): string {
-    const text = (raw ?? "").trim();
+  /** 空值、纯文本、以及 JSON 数字都收成字符串。对象不能 trim，否则会 500。 */
+  private requiredText(raw: unknown, label: string): string {
+    let text = "";
+    if (typeof raw === "string") text = raw.trim();
+    else if (typeof raw === "number" && Number.isFinite(raw)) text = String(raw);
+    else if (raw != null) this.fail("INVALID_INPUT", `${label}格式不正确`);
     if (!text) this.fail("INVALID_INPUT", `${label}不能为空`);
     if (text.length > 200) this.fail("INVALID_INPUT", `${label}过长`);
     return text;
@@ -3933,7 +3938,7 @@ function utcDay(now: Date): string {
   return now.toISOString().slice(0, 10);
 }
 
-function formatStored(raw: string): string {
+function formatStored(raw: unknown): string {
   const minor = parseAmount(raw);
   const whole = minor / 100n;
   const frac = (minor % 100n).toString().padStart(2, "0");

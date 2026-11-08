@@ -603,49 +603,115 @@
       return table[row.entity + ":" + row.queue] || null;
     }
 
+    /**
+     * 路径只收本路径的审批队列。申请人自己的草稿和已驳回单即使落在另一路径也单独列出，
+     * 避免待办被滤成「没有待办」。
+     */
+    function splitTodos(rows, selectedPath) {
+      const allowed = selectedPath === "company" ? ["PR", "PREPAY"] : ["PRE", "EXP"];
+      const onPath = [];
+      const heldOffPath = [];
+      for (const row of rows || []) {
+        if (!row) continue;
+        const held = row.queue === "applicant" && (row.status === "draft" || row.status === "rejected");
+        if (allowed.includes(row.entity)) onPath.push(row);
+        else if (held) heldOffPath.push(row);
+      }
+      return { onPath: onPath, heldOffPath: heldOffPath };
+    }
+
+    function otherPathName(selectedPath) {
+      return selectedPath === "company" ? "员工垫付报销" : "公司采购";
+    }
+
+    function otherPathId(selectedPath) {
+      return selectedPath === "company" ? "reimburse" : "company";
+    }
+
+    /** 当前路径被滤空时的文案。刚驳回且自己没有待办时，说明单据回到了申请人。 */
+    function todoEmptyLines(split, showReturnedHint) {
+      if (split.onPath.length) return [];
+      if (split.heldOffPath.length) {
+        return ["当前路径没有待办；你还有 " + split.heldOffPath.length + " 条驳回/草稿在另一路径（点返回重选路径）。"];
+      }
+      const lines = ["没有待办。"];
+      if (showReturnedHint) lines.push("驳回后单据回到申请人待办。");
+      return lines;
+    }
+
+    function renderTodoCard(row) {
+      const kindName = { PR: "请购", PREPAY: "预付", PRE: "事前", EXP: "报销" };
+      const block = document.createElement("div");
+      block.className = "doc";
+      block.dataset.todo = row.id;
+      const title = document.createElement("strong");
+      title.textContent = row.docNo + " · " + row.title + " · " + row.amount + " " + row.currency;
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = (kindName[row.entity] || row.entity) + " " + row.status
+        + (row.queue === "applicant" ? " · 待你处理" : " · 待你审批");
+      block.append(title, meta);
+      appendRejectReason(block, row);
+      const actions = document.createElement("div");
+      actions.className = "row";
+      if (row.queue === "applicant" && me.id === row.applicantId && (row.status === "draft" || row.status === "rejected")) {
+        const again = row.status === "rejected";
+        actions.append(button("编辑", "edit", row.id, "ghost", row.entity));
+        if (row.entity === "PR") {
+            actions.append(button(again ? "重新提交" : "提交", "submit", row.id));
+            actions.append(button("取消请购", "pr-cancel", row.id, "danger"));
+          }
+          if (row.entity === "PREPAY") {
+            actions.append(button(again ? "重新提交" : "提交预付", "prepay-submit", row.id));
+            actions.append(button("取消预付", "prepay-cancel", row.id, "ghost"));
+          }
+          if (row.entity === "PRE") {
+            actions.append(button(again ? "重新提交" : "提交事前", "pre-submit", row.id));
+            actions.append(button("取消事前", "pre-cancel", row.id, "ghost"));
+          }
+          if (row.entity === "EXP") {
+            actions.append(button(again ? "重新提交" : "提交报销", "exp-submit", row.id));
+            actions.append(button("取消报销", "exp-cancel", row.id, "ghost"));
+          }
+        }
+      const decision = todoDecision(row);
+      if (decision) {
+        actions.append(button("通过", decision[0], row.id));
+        actions.append(button("驳回", decision[1], row.id, "danger"));
+      }
+      if (actions.childElementCount) block.append(actions);
+      return block;
+    }
+
+    let showReturnedHint = false;
+
     function renderTodos() {
       todosEl.innerHTML = "";
+      const returnedHint = showReturnedHint;
+      showReturnedHint = false;
       if (!me || !selectedPath) {
         todosEl.textContent = "登录并选择路径后显示你的待办。";
         return;
       }
-      const allowed = selectedPath === "company" ? ["PR", "PREPAY"] : ["PRE", "EXP"];
-      const rows = (todos || []).filter((row) => allowed.includes(row.entity));
-      if (!rows.length) {
-        todosEl.textContent = "没有待办。";
-        return;
-      }
-      const kindName = { PR: "请购", PREPAY: "预付", PRE: "事前", EXP: "报销" };
+      const split = splitTodos(todos, selectedPath);
       const wrap = document.createElement("div");
-      for (const row of rows) {
-        const block = document.createElement("div");
-        block.className = "doc";
-        block.dataset.todo = row.id;
-        const title = document.createElement("strong");
-        title.textContent = row.docNo + " · " + row.title + " · " + row.amount + " " + row.currency;
-        const meta = document.createElement("div");
-        meta.className = "meta";
-        meta.textContent = (kindName[row.entity] || row.entity) + " " + row.status
-          + (row.queue === "applicant" ? " · 待你处理" : " · 待你审批");
-        block.append(title, meta);
-        appendRejectReason(block, row);
-        const actions = document.createElement("div");
-        actions.className = "row";
-        if (row.queue === "applicant" && me.id === row.applicantId && (row.status === "draft" || row.status === "rejected")) {
-          const again = row.status === "rejected";
-          actions.append(button("编辑", "edit", row.id, "ghost", row.entity));
-          if (row.entity === "PR") actions.append(button(again ? "重新提交" : "提交", "submit", row.id));
-          if (row.entity === "PREPAY") actions.append(button(again ? "重新提交" : "提交预付", "prepay-submit", row.id));
-          if (row.entity === "PRE") actions.append(button(again ? "重新提交" : "提交事前", "pre-submit", row.id));
-          if (row.entity === "EXP") actions.append(button(again ? "重新提交" : "提交报销", "exp-submit", row.id));
-        }
-        const decision = todoDecision(row);
-        if (decision) {
-          actions.append(button("通过", decision[0], row.id));
-          actions.append(button("驳回", decision[1], row.id, "danger"));
-        }
-        if (actions.childElementCount) block.append(actions);
-        wrap.append(block);
+      for (const line of todoEmptyLines(split, returnedHint)) {
+        const note = document.createElement("p");
+        note.className = line === "没有待办。" ? "meta" : "banner";
+        note.dataset.todoNote = line === "驳回后单据回到申请人待办。" ? "returned" : (split.heldOffPath.length ? "cross-path" : "empty");
+        note.textContent = line;
+        wrap.append(note);
+      }
+      for (const row of split.onPath) wrap.append(renderTodoCard(row));
+      if (split.heldOffPath.length) {
+        const bar = document.createElement("div");
+        bar.className = "row";
+        const label = document.createElement("span");
+        label.className = "meta";
+        label.textContent = "另一路径 · " + otherPathName(selectedPath);
+        bar.append(label, button("切到" + otherPathName(selectedPath), "switch-path", otherPathId(selectedPath), "ghost"));
+        wrap.append(bar);
+        for (const row of split.heldOffPath) wrap.append(renderTodoCard(row));
       }
       todosEl.append(wrap);
     }
@@ -1500,6 +1566,7 @@
         closeReject();
         try {
           await api(url, { method: "POST", body: JSON.stringify({ reason }) });
+          showReturnedHint = true;
           notice("ok", "已驳回，单据回到申请人待办");
           await refresh();
         } catch (error) {
@@ -1868,7 +1935,9 @@
       form.append(fields, linesHost, actions);
       if (entity === "PR") renderEditLines();
       card.hidden = false;
-      card.scrollIntoView({ block: "nearest" });
+      const first = form.querySelector("input, textarea");
+      if (first) first.focus();
+      card.scrollIntoView({ block: "start" });
     }
 
     function splitInvoiceNos(raw) {
@@ -1959,6 +2028,15 @@
       }
       if (act === "edit") {
         openEdit(target.dataset.entity, id);
+        return;
+      }
+      if (act === "switch-path") {
+        if (id !== "company" && id !== "reimburse") return;
+        closeEdit();
+        rememberPath(id);
+        notice("", "");
+        applyPathView();
+        renderDocs();
         return;
       }
       try {

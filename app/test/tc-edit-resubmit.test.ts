@@ -36,6 +36,11 @@ test("走查页给草稿和已驳回单据编辑入口，提交按钮仍在", as
     assert.match(html, /id="edit-card"/);
     assert.match(html, /id="edit-form"/);
     assert.match(html, /button\("编辑", "edit", row\.id, "ghost", row\.entity\)/);
+    assert.match(html, /button\("取消请购", "pr-cancel", row\.id, "danger"\)/);
+    assert.match(html, /button\("取消预付", "prepay-cancel", row\.id, "ghost"\)/);
+    assert.match(html, /button\("取消事前", "pre-cancel", row\.id, "ghost"\)/);
+    assert.match(html, /button\("取消报销", "exp-cancel", row\.id, "ghost"\)/);
+    assert.match(html, /card\.scrollIntoView\(\{ block: "start" \}\)/);
     assert.match(html, /button\("编辑", "edit", pr\.id, "ghost", "PR"\)/);
     assert.match(html, /button\("编辑", "edit", prepay\.id, "ghost", "PREPAY"\)/);
     assert.match(html, /button\("编辑", "edit", pre\.id, "ghost", "PRE"\)/);
@@ -506,5 +511,141 @@ test("同一套驳回后修改再提交连续跑十轮，事由和金额都不�
     } finally {
       await app.close();
     }
+  }
+});
+
+test("驳回后用数字单价、字符串数量修改再提交，请购事前报销预付都不 500", async () => {
+  const { app } = await boot();
+  try {
+    const people = await loginActors(app);
+
+    const pr = await call(app, people.applicant, "POST", "/api/pr", {
+      currency: "CNY",
+      deptId: "D-ADMIN",
+      purpose: "待改请购",
+      lines: [{ itemName: "显示器", qty: 1, estUnitPrice: "100.00", category: "consumable", spec: "旧", purchaseUrl: "" }],
+    });
+    assert.equal(pr.status, 200, JSON.stringify(pr.body));
+    assert.equal((await call(app, people.applicant, "POST", `/api/pr/${pr.body.id}/submit`)).status, 200);
+    const empty = await call(app, people.dept, "POST", `/api/pr/${pr.body.id}/dept-reject`, { reason: "  " });
+    assert.equal(empty.status, 400);
+    assert.equal(empty.body.error, "REJECT_REASON_REQUIRED");
+    assert.equal((await call(app, people.dept, "POST", `/api/pr/${pr.body.id}/dept-reject`, { reason: "规格不对" })).status, 200);
+    assert.equal((await todos(app, people.dept)).find((row) => row.id === pr.body.id), undefined);
+    const mine = (await todos(app, people.applicant)).find((row) => row.id === pr.body.id);
+    assert.equal(mine?.status, "rejected");
+    assert.equal(mine?.rejectReason, "规格不对");
+
+    const updated = await call(app, people.applicant, "POST", `/api/pr/${pr.body.id}/update`, {
+      deptId: "D-ADMIN",
+      purpose: "改过的请购",
+      lines: [{
+        itemName: "新显示器",
+        spec: "32 寸",
+        purchaseUrl: "https://example.com/new",
+        qty: "3",
+        estUnitPrice: 1800,
+        category: "consumable",
+      }],
+    });
+    assert.equal(updated.status, 200, JSON.stringify(updated.body));
+    assert.equal(updated.body.status, "rejected");
+    assert.equal(updated.body.rejectReason, "规格不对");
+    assert.equal(updated.body.purpose, "改过的请购");
+    assert.equal(updated.body.amount, "5400.00");
+    assert.equal(updated.body.lines[0].qty, 3);
+    assert.equal(updated.body.lines[0].estUnitPrice, "1800.00");
+    assert.equal(updated.body.lines[0].spec, "32 寸");
+    const again = await call(app, people.applicant, "POST", `/api/pr/${pr.body.id}/submit`);
+    assert.equal(again.status, 200, JSON.stringify(again.body));
+    assert.equal(again.body.status, "submitted");
+    assert.equal(again.body.rejectReason, null);
+    const deptTodo = (await todos(app, people.dept)).find((row) => row.id === pr.body.id);
+    assert.equal(deptTodo?.queue, "dept");
+    assert.equal(deptTodo?.title, "改过的请购");
+    assert.equal(deptTodo?.amount, "5400.00");
+    assert.equal((await todos(app, people.applicant)).find((row) => row.id === pr.body.id), undefined);
+
+    const pre = await call(app, people.applicant, "POST", "/api/pre", {
+      companyCode: "SZ",
+      currency: "CNY",
+      deptId: "D-ADMIN",
+      purpose: "待改事前",
+      amount: "80.00",
+    });
+    assert.equal((await call(app, people.applicant, "POST", `/api/pre/${pre.body.id}/submit`)).status, 200);
+    assert.equal((await call(app, people.dept, "POST", `/api/pre/${pre.body.id}/dept-reject`, { reason: "事由不清" })).status, 200);
+    const preUpdated = await call(app, people.applicant, "POST", `/api/pre/${pre.body.id}/update`, {
+      deptId: "D-FIN",
+      purpose: "改过的事前",
+      amount: 120.5,
+    });
+    assert.equal(preUpdated.status, 200, JSON.stringify(preUpdated.body));
+    assert.equal(preUpdated.body.amount, "120.50");
+    assert.equal(preUpdated.body.purpose, "改过的事前");
+    assert.equal(preUpdated.body.rejectReason, "事由不清");
+    const preAgain = await call(app, people.applicant, "POST", `/api/pre/${pre.body.id}/submit`);
+    assert.equal(preAgain.body.rejectReason, null);
+    assert.equal(preAgain.body.status, "submitted");
+    assert.equal((await todos(app, people.dept)).find((row) => row.id === pre.body.id)?.title, "改过的事前");
+
+    assert.equal((await call(app, people.dept, "POST", `/api/pre/${pre.body.id}/dept-approve`)).body.status, "approved");
+    const expense = await call(app, people.applicant, "POST", "/api/exp", {
+      preApprovalId: pre.body.id,
+      purpose: "待改报销",
+      amount: "80.00",
+      invoiceNos: ["INV-EDIT-1"],
+      employeeAccount: "62220001",
+    });
+    assert.equal(expense.status, 200, JSON.stringify(expense.body));
+    assert.equal((await call(app, people.applicant, "POST", `/api/exp/${expense.body.id}/submit`)).status, 200);
+    assert.equal((await call(app, people.dept, "POST", `/api/exp/${expense.body.id}/dept-approve`)).status, 200);
+    const ticket = await call(app, people.finance, "POST", `/api/exp/${expense.body.id}/ticket-reject`, { reason: "票号有误" });
+    assert.equal(ticket.body.status, "rejected");
+    assert.equal((await todos(app, people.applicant)).find((row) => row.id === expense.body.id)?.rejectReason, "票号有误");
+    const expUpdated = await call(app, people.applicant, "POST", `/api/exp/${expense.body.id}/update`, {
+      purpose: "换票报销",
+      amount: 60,
+      invoiceNos: [998877],
+      employeeAccount: "62228888",
+    });
+    assert.equal(expUpdated.status, 200, JSON.stringify(expUpdated.body));
+    assert.equal(expUpdated.body.amount, "60.00");
+    assert.deepEqual(expUpdated.body.invoiceNos, ["998877"]);
+    assert.equal(expUpdated.body.rejectReason, "票号有误");
+    const expAgain = await call(app, people.applicant, "POST", `/api/exp/${expense.body.id}/submit`);
+    assert.equal(expAgain.status, 200, JSON.stringify(expAgain.body));
+    assert.equal(expAgain.body.rejectReason, null);
+    assert.equal((await todos(app, people.dept)).find((row) => row.id === expense.body.id)?.title, "换票报销");
+
+    const po = await issueTermsPo(app, people, { unitPrice: "10000.00", paymentTerms: "prepay", purpose: "中额预付修改" });
+    const prepay = await call(app, people.admin, "POST", "/api/prepay", {
+      poId: po.id,
+      amount: "4000.00",
+      proforma: { invoiceNo: "PF-NUM", amount: "4000.00", tax: "0.00" },
+    });
+    assert.equal(prepay.status, 200, JSON.stringify(prepay.body));
+    const prepayId = prepay.body.id as string;
+    assert.equal((await call(app, people.admin, "POST", `/api/prepay/${prepayId}/submit`)).status, 200);
+    assert.equal((await call(app, people.dept, "POST", `/api/prepay/${prepayId}/dept-approve`)).body.financeGate, "required");
+    const finReject = await call(app, people.finance, "POST", `/api/prepay/${prepayId}/finance-reject`, { reason: "金额不对" });
+    assert.equal(finReject.body.status, "rejected");
+    assert.equal((await todos(app, people.finance)).find((row) => row.id === prepayId), undefined);
+    assert.equal((await todos(app, people.admin)).find((row) => row.id === prepayId)?.rejectReason, "金额不对");
+    const prepayUpdated = await call(app, people.admin, "POST", `/api/prepay/${prepayId}/update`, {
+      amount: 4500,
+      proforma: { invoiceNo: "PF-NUM", amount: 4500, tax: 0 },
+    });
+    assert.equal(prepayUpdated.status, 200, JSON.stringify(prepayUpdated.body));
+    assert.equal(prepayUpdated.body.amount, "4500.00");
+    assert.equal(prepayUpdated.body.status, "rejected");
+    assert.equal(prepayUpdated.body.rejectReason, "金额不对");
+    const prepayAgain = await call(app, people.admin, "POST", `/api/prepay/${prepayId}/submit`);
+    assert.equal(prepayAgain.status, 200, JSON.stringify(prepayAgain.body));
+    assert.equal(prepayAgain.body.rejectReason, null);
+    assert.equal(prepayAgain.body.status, "submitted");
+    assert.equal((await todos(app, people.dept)).find((row) => row.id === prepayId)?.queue, "dept");
+  } finally {
+    await app.close();
   }
 });
