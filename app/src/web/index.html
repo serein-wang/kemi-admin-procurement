@@ -249,6 +249,11 @@
     }
     .modal h3 { margin: 0; font-size: 15px; font-weight: 600; color: var(--ink); }
     #audits { overflow-x: auto; }
+    #audit-query { margin-top: 0; }
+    .doc-detail { margin-top: 6px; }
+    .doc-detail summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+    #ended-docs { margin-top: 4px; }
+    #ended-bar { margin-top: 4px; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; border: 1px solid #ebeef5; }
     th, td { text-align: left; border-bottom: 1px solid #ebeef5; padding: 8px 10px; vertical-align: top; }
     th { background: #f5f7fa; color: var(--muted); font-weight: 500; }
@@ -446,7 +451,7 @@
       <div class="card" id="edit-card" hidden>
         <h2 id="edit-title">编辑单据</h2>
         <div id="edit-reject" class="reject-reason" hidden></div>
-        <p id="edit-hint" class="hint">保存后单据仍停留在草稿或已驳回。提交或重新提交才会送审；驳回理由在重新提交成功后消失。</p>
+        <p id="edit-hint" class="hint">保存后单据仍停留在草稿或已驳回。提交或重新提交才会送审；驳回理由在重新提交或取消后消失。</p>
         <form id="edit-form"></form>
       </div>
       <div class="card">
@@ -459,7 +464,12 @@
       </div>
       <div class="card">
         <h2>审计</h2>
-        <div id="audits" class="meta">暂无</div>
+        <form id="audit-query" class="row">
+          <input name="docNo" placeholder="单号，如 PR-0034" aria-label="按单号查询" autocomplete="off" />
+          <button type="submit" class="ghost">按单号查询</button>
+        </form>
+        <p class="hint">流转记录按单号向后台查询，不在单据卡片上展开。</p>
+        <div id="audits" class="meta">输入单号后查询。</div>
       </div>
     </section>
     </div>
@@ -489,6 +499,8 @@
     let workspace = null;
     let todos = [];
     let selectedPath = null;
+    let showEnded = false;
+    let auditDocNo = "";
     const REJECT_URL = {
       "dept-reject": (id) => "/api/pr/" + id + "/dept-reject",
       "finance-reject": (id) => "/api/pr/" + id + "/finance-reject",
@@ -578,13 +590,175 @@
       return el;
     }
 
+    function statusLabel(code) {
+      if (!code) return "—";
+      const labels = {
+        draft: "草稿",
+        submitted: "待审批",
+        dept_approved: "部门已通过",
+        finance_approved: "财务已通过",
+        ceo_approved: "总经理已通过",
+        sourcing: "比价中",
+        ready_for_po: "待下单",
+        closed_converted: "已转采购单",
+        rejected: "已驳回",
+        cancelled: "已取消",
+        issued: "已下单",
+        awaiting_prepay: "待预付",
+        awaiting_receipt: "待验收",
+        partially_received: "部分验收",
+        fully_received: "已验收",
+        matched: "已匹配",
+        payment_pending: "待付款",
+        paid: "已付款",
+        closed: "已关闭",
+        finance_cosigned: "财务已加签",
+        finance_payment_approved: "待出纳付款",
+        accrued: "已记账",
+        awaiting_delivery: "待到货",
+        settling: "核销中",
+        settled_equal: "已核销",
+        settled_with_balance: "已核销，有尾款",
+        settled_with_refund: "已核销退款",
+        overdue_flagged: "已超期",
+        chasing: "跟催中",
+        reclaim_requested: "追索中",
+        reclaimed: "已追回",
+        disputed: "纠纷中",
+        approved: "已批准",
+        consumed_by_expense: "已报销",
+        expired: "已过期",
+        ticket_checked: "已审票",
+        payment_approved: "待打款",
+        active: "在用",
+        transferred: "已调拨",
+        retired: "已停用",
+        pending: "未开始",
+        required: "待审",
+        skipped: "已跳过",
+        none: "未占用",
+        soft: "占用中",
+        hard: "已锁定",
+        released: "已释放",
+        requested: "已申请",
+        executed: "已执行",
+        after_delivery: "货到付款",
+        monthly: "月结",
+        prepay: "先款后货",
+        equal: "金额相符",
+        short: "发票短少",
+        over: "溢付",
+      };
+      return Object.prototype.hasOwnProperty.call(labels, code) ? labels[code] : code;
+    }
+
+    function isEndedDoc(kind, status) {
+      const ended = {
+        PR: ["cancelled", "closed_converted"],
+        PO: ["cancelled", "closed"],
+        PREPAY: ["cancelled", "settled_equal", "settled_with_balance", "settled_with_refund", "reclaimed"],
+        PAY: ["paid", "rejected"],
+        PRE: ["cancelled", "expired", "consumed_by_expense"],
+        EXP: ["cancelled", "paid"],
+        ASSET: ["retired"],
+      };
+      const list = ended[kind];
+      return Array.isArray(list) && list.indexOf(status) >= 0;
+    }
+
+    function rejectReasonVisible(doc) {
+      if (!doc || doc.status !== "rejected") return false;
+      const reason = typeof doc.rejectReason === "string" ? doc.rejectReason.trim() : "";
+      return reason.length > 0;
+    }
+
+    function auditObjectLabel(entity, id) {
+      const names = {
+        PR: "请购",
+        PO: "采购单",
+        GRN: "验收",
+        ASSET: "资产",
+        INV: "发票",
+        MATCH: "匹配",
+        PAY: "付款",
+        PREPAY: "预付",
+        SETTLE: "核销",
+        REFUND: "退款",
+        CHASE: "跟催",
+        RECLAIM: "追索",
+        PRE: "事前",
+        EXP: "报销",
+        USER: "用户",
+        BUDGET: "预算",
+      };
+      return (names[entity] || entity || "") + " " + (id || "");
+    }
+
+    function humanAuditComment(comment) {
+      let text = String(comment || "");
+      text = text.replace(/Q8\s*/g, "");
+      text = text.replace(/^[①②][-－](?:P|E)?\d+\s*/u, "");
+      text = text.replace(/[；;]\s*释放(?:软|硬)占用/g, "");
+      text = text.replace(/[；;]\s*(?:软|硬)占用(?:转为(?:软|硬)占用)?/g, "");
+      text = text.replace(/^(?:释放)?(?:软|硬)占用(?:转为(?:软|硬)占用)?$/, "预算占用");
+      text = text.replace(/[；;]\s*$/g, "");
+      text = text.replace(/\s{2,}/g, " ").trim();
+      return text;
+    }
+
+    function presentAuditRow(row) {
+      const object = auditObjectLabel(row && row.entity, (row && (row.docNo || row.entityId)) || "");
+      let move;
+      if (row && row.sodViolationCode) {
+        move = statusLabel(row.fromStatus) + " → " + statusLabel(row.toStatus) + " · " + row.sodViolationCode;
+      } else if (row && row.fromStatus && row.fromStatus === row.toStatus) {
+        move = "修改";
+      } else {
+        move = statusLabel(row && row.fromStatus) + " → " + statusLabel(row && row.toStatus);
+      }
+      if (row && row.skipped) move += " · 跳过";
+      return { object: object, move: move, comment: humanAuditComment(row && row.comment) };
+    }
+
     function appendRejectReason(parent, doc) {
-      const reason = doc && typeof doc.rejectReason === "string" ? doc.rejectReason.trim() : "";
-      if (!reason) return;
+      if (!rejectReasonVisible(doc)) return;
       const box = document.createElement("div");
       box.className = "reject-reason";
-      box.textContent = "驳回理由：" + reason;
+      box.textContent = "驳回理由：" + doc.rejectReason.trim();
       parent.append(box);
+    }
+
+    function appendDetail(parent, lines) {
+      const bits = [];
+      for (const line of lines || []) {
+        if (line) bits.push(line);
+      }
+      if (!bits.length) return;
+      const box = document.createElement("details");
+      box.className = "doc-detail";
+      const summary = document.createElement("summary");
+      summary.textContent = "详情";
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = bits.join(" · ");
+      box.append(summary, meta);
+      parent.append(box);
+    }
+
+    /** 取消、驳回和已结束单据不再铺关卡。进行中的关卡与预算只放进折叠详情。 */
+    function approvalDetail(doc) {
+      if (!doc) return [];
+      if (doc.status === "cancelled" || doc.status === "rejected" || doc.status === "closed" || doc.status === "closed_converted") {
+        return [];
+      }
+      const lines = [];
+      if (doc.reserveStatus) lines.push("预算 " + statusLabel(doc.reserveStatus));
+      if (doc.financeGate) lines.push("财务关卡 " + statusLabel(doc.financeGate));
+      if (doc.ceoGate) lines.push("总经理关卡 " + statusLabel(doc.ceoGate));
+      if (Object.prototype.hasOwnProperty.call(doc, "rfqRequired")) {
+        lines.push("比价 " + (doc.rfqRequired == null ? "未定" : doc.rfqRequired ? "必须" : "可免"));
+      }
+      return lines;
     }
 
     /** 待办只带 queue，不带财务/总经理关卡。通过与驳回按队列映射到既有动作。 */
@@ -648,7 +822,7 @@
       title.textContent = row.docNo + " · " + row.title + " · " + row.amount + " " + row.currency;
       const meta = document.createElement("div");
       meta.className = "meta";
-      meta.textContent = (kindName[row.entity] || row.entity) + " " + row.status
+      meta.textContent = (kindName[row.entity] || row.entity) + " · " + statusLabel(row.status)
         + (row.queue === "applicant" ? " · 待你处理" : " · 待你审批");
       block.append(title, meta);
       appendRejectReason(block, row);
@@ -724,6 +898,17 @@
         return;
       }
       const wrap = document.createElement("div");
+      const endedWrap = document.createElement("div");
+      endedWrap.id = "ended-docs";
+      if (!showEnded) endedWrap.hidden = true;
+      let liveCount = 0;
+      function mountDoc(kind, status, block) {
+        if (isEndedDoc(kind, status)) endedWrap.append(block);
+        else {
+          liveCount += 1;
+          wrap.append(block);
+        }
+      }
       if (selectedPath === "company" && hasRole("finance")) {
         const tools = document.createElement("div");
         tools.className = "row";
@@ -737,13 +922,12 @@
         title.textContent = pr.docNo + " · " + pr.purpose + " · " + pr.amount + " " + pr.currency;
         const meta = document.createElement("div");
         meta.className = "meta";
-        meta.textContent = "请购 " + pr.status
-          + " · " + pr.companyCode + "/" + pr.currency
-          + " · " + (pr.docType === "low_value" ? "低值易耗" : "标准")
-          + " · 预算 " + pr.reserveStatus
-          + " · 财务关卡 " + pr.financeGate
-          + " · 总经理关卡 " + pr.ceoGate
-          + " · 比价 " + (pr.rfqRequired == null ? "未定" : pr.rfqRequired ? "必须" : "可免");
+        meta.textContent = [
+          "请购",
+          statusLabel(pr.status),
+          pr.companyCode + "/" + pr.currency,
+          pr.docType === "low_value" ? "低值易耗" : "标准",
+        ].join(" · ");
         const lineDetail = prLineDetail(pr.lines);
         const actions = document.createElement("div");
         actions.className = "row";
@@ -798,25 +982,28 @@
           block.append(detail);
         }
         appendLineImages(block, pr.lines);
+        appendDetail(block, approvalDetail(pr));
         block.append(actions);
-        wrap.append(block);
+        mountDoc("PR", pr.status, block);
       }
       for (const po of selectedPath === "company" ? workspace.pos : []) {
         const block = document.createElement("div");
         block.className = "doc";
         const title = document.createElement("strong");
-        title.textContent = po.docNo + " · " + po.paymentTerms + " · " + po.amount + " " + po.currency;
+        title.textContent = po.docNo + " · " + statusLabel(po.paymentTerms) + " · " + po.amount + " " + po.currency;
         const meta = document.createElement("div");
         meta.className = "meta";
-        meta.textContent = "采购单 " + po.status
-          + " · " + po.companyCode + "/" + po.currency
-          + " · 预算 " + po.reserveStatus
-          + " · 下单 " + userName(po.issuerId)
-          + " · 验收人应是 " + userName(po.applicantId)
-          + " · D4 " + po.disposition
-          + (po.erpInboundRefs.length ? " · 入库 " + po.erpInboundRefs.join(",") : "");
+        meta.textContent = ["采购单", statusLabel(po.status), po.companyCode + "/" + po.currency].join(" · ");
         block.append(title, meta);
         appendLineImages(block, po.lines);
+        const poDetail = approvalDetail(po);
+        if (po.status !== "cancelled" && po.status !== "closed") {
+          poDetail.push("下单 " + userName(po.issuerId));
+          poDetail.push("验收人 " + userName(po.applicantId));
+          poDetail.push("去向 " + (po.disposition === "asset" ? "固定资产" : po.disposition === "expense" ? "费用" : "未定"));
+          if (po.erpInboundRefs.length) poDetail.push("入库 " + po.erpInboundRefs.join(","));
+        }
+        appendDetail(block, poDetail);
         const actions = document.createElement("div");
         actions.className = "row";
         if ((po.status === "awaiting_receipt" || po.status === "partially_received") && me && me.id === po.applicantId) {
@@ -890,7 +1077,7 @@
           actions.append(button("发起尾款", "pay-request", po.id));
         }
         block.append(actions);
-        wrap.append(block);
+        mountDoc("PO", po.status, block);
       }
       for (const card of selectedPath === "company" ? (workspace.assets || []) : []) {
         const block = document.createElement("div");
@@ -899,9 +1086,7 @@
         title.textContent = card.assetNo + " · " + card.name + " · " + card.capitalizedAmount + " " + card.currency;
         const meta = document.createElement("div");
         meta.className = "meta";
-        meta.textContent = "资产卡 " + card.status
-          + " · " + card.companyCode
-          + " · 建卡 " + userName(card.creatorId)
+        meta.textContent = "资产 · " + statusLabel(card.status)
           + " · 保管 " + userName(card.custodianId)
           + " · " + card.location;
         const actions = document.createElement("div");
@@ -925,7 +1110,8 @@
           actions.append(location, custodian, button("调拨", "asset-transfer", card.id), button("停用", "asset-retire", card.id, "danger"));
         }
         block.append(title, meta, actions);
-        wrap.append(block);
+        appendDetail(block, ["建卡 " + userName(card.creatorId), card.companyCode]);
+        mountDoc("ASSET", card.status, block);
       }
       for (const prepay of selectedPath === "company" ? (workspace.prepays || []) : []) {
         const block = document.createElement("div");
@@ -936,11 +1122,7 @@
         const refund = (workspace.refunds || []).find((row) => row.prepayId === prepay.id);
         const meta = document.createElement("div");
         meta.className = "meta";
-        meta.textContent = "预付 " + prepay.status
-          + " · 财务关卡 " + prepay.financeGate
-          + " · 总经理关卡 " + prepay.ceoGate
-          + (settle ? " · D-P2 " + settle.dp2Result : "")
-          + (refund ? " · 溢付 " + refund.mode + " " + refund.status : "");
+        meta.textContent = "预付 · " + statusLabel(prepay.status);
         const actions = document.createElement("div");
         actions.className = "row";
         if ((prepay.status === "draft" || prepay.status === "rejected") && me && me.id === prepay.applicantId) {
@@ -1051,18 +1233,25 @@
         }
         block.append(title, meta);
         appendRejectReason(block, prepay);
+        const prepayDetail = approvalDetail(prepay);
+        if (settle && prepay.status !== "cancelled" && prepay.status !== "rejected") {
+          prepayDetail.push("核对 " + statusLabel(settle.dp2Result));
+        }
+        if (refund && prepay.status !== "cancelled" && prepay.status !== "rejected") {
+          prepayDetail.push("溢付 " + (refund.mode === "refund" ? "退款" : "挂账") + " " + statusLabel(refund.status));
+        }
+        appendDetail(block, prepayDetail);
         block.append(actions);
-        wrap.append(block);
+        mountDoc("PREPAY", prepay.status, block);
       }
       for (const pay of selectedPath === "company" ? workspace.payments : []) {
         const block = document.createElement("div");
         block.className = "doc";
         const title = document.createElement("strong");
-        title.textContent = pay.docNo + " · 付款 " + pay.status + " · " + pay.amount;
+        title.textContent = pay.docNo + " · 付款 " + pay.amount;
         const meta = document.createElement("div");
         meta.className = "meta";
-        meta.textContent = "记账人 " + userName(pay.voucherCreatorId)
-          + (pay.payerId ? " · 付款人 " + userName(pay.payerId) : "");
+        meta.textContent = "付款 · " + statusLabel(pay.status);
         const actions = document.createElement("div");
         actions.className = "row";
         if (pay.status === "submitted" && hasRole("finance")) actions.append(button("批准付款", "pay-approve", pay.id));
@@ -1075,7 +1264,11 @@
           actions.append(bank, button("出纳付款", "pay", pay.id));
         }
         block.append(title, meta, actions);
-        wrap.append(block);
+        appendDetail(block, [
+          "记账人 " + userName(pay.voucherCreatorId),
+          pay.payerId ? "付款人 " + userName(pay.payerId) : "",
+        ]);
+        mountDoc("PAY", pay.status, block);
       }
       for (const pre of selectedPath === "reimburse" ? (workspace.pres || []) : []) {
         const block = document.createElement("div");
@@ -1084,7 +1277,7 @@
         title.textContent = pre.docNo + " · 事前 " + pre.amount + " " + pre.currency + " · " + pre.purpose;
         const meta = document.createElement("div");
         meta.className = "meta";
-        meta.textContent = "事前 " + pre.status + (pre.consumedByExpenseId ? " · 占用 " + pre.consumedByExpenseId : "");
+        meta.textContent = "事前 · " + statusLabel(pre.status);
         const actions = document.createElement("div");
         actions.className = "row";
         if ((pre.status === "draft" || pre.status === "rejected") && me && me.id === pre.applicantId) {
@@ -1118,8 +1311,9 @@
         }
         block.append(title, meta);
         appendRejectReason(block, pre);
+        appendDetail(block, pre.consumedByExpenseId && pre.status !== "cancelled" ? ["关联报销 " + pre.consumedByExpenseId] : []);
         block.append(actions);
-        wrap.append(block);
+        mountDoc("PRE", pre.status, block);
       }
       for (const expense of selectedPath === "reimburse" ? (workspace.expenses || []) : []) {
         const block = document.createElement("div");
@@ -1128,10 +1322,11 @@
         title.textContent = expense.docNo + " · 报销 " + expense.amount + " " + expense.currency;
         const meta = document.createElement("div");
         meta.className = "meta";
-        meta.textContent = "报销 " + expense.status
-          + " · 事前 " + expense.preApprovalId
-          + " · 财务关卡 " + expense.financeGate
-          + " · 发票 " + (expense.invoiceNos || []).join(",");
+        const expenseBits = ["报销", statusLabel(expense.status)];
+        if (expense.status !== "cancelled" && expense.status !== "rejected" && (expense.invoiceNos || []).length) {
+          expenseBits.push("发票 " + expense.invoiceNos.join(","));
+        }
+        meta.textContent = expenseBits.join(" · ");
         const actions = document.createElement("div");
         actions.className = "row";
         if ((expense.status === "draft" || expense.status === "rejected") && me && me.id === expense.applicantId) {
@@ -1162,55 +1357,103 @@
         }
         block.append(title, meta);
         appendRejectReason(block, expense);
+        const expenseDetail = approvalDetail(expense);
+        if (expense.status !== "cancelled" && expense.status !== "rejected") {
+          expenseDetail.unshift("事前 " + expense.preApprovalId);
+        }
+        appendDetail(block, expenseDetail);
         block.append(actions);
-        wrap.append(block);
+        mountDoc("EXP", expense.status, block);
       }
-      if (!wrap.childElementCount) {
+      const endedCount = endedWrap.childElementCount;
+      if (!liveCount && !endedCount && !wrap.childElementCount) {
         wrap.textContent = selectedPath === "company"
           ? "这条路径还没有请购或采购单。"
           : "这条路径还没有事前申请或报销。";
+      } else if (!liveCount && endedCount) {
+        const note = document.createElement("p");
+        note.className = "meta";
+        note.id = "live-empty";
+        note.textContent = "没有进行中的单据。";
+        wrap.prepend(note);
+      }
+      if (endedCount) {
+        const bar = document.createElement("div");
+        bar.className = "row";
+        bar.id = "ended-bar";
+        bar.append(button(showEnded ? "收起已结束" : "已结束（" + endedCount + "）", "toggle-ended", "docs", "ghost"));
+        wrap.append(bar, endedWrap);
       }
       docsEl.append(wrap);
       renderAudits();
     }
 
     function renderAudits() {
-      auditsEl.innerHTML = "";
-      const companyAudit = new Set(["PR", "PO", "GRN", "ASSET", "INV", "MATCH", "PAY", "PREPAY"]);
-      const reimburseAudit = new Set(["PRE", "EXP"]);
-      const rows = ((workspace && workspace.audits) || []).filter((row) => {
-        if (selectedPath === "company") return companyAudit.has(row.entity);
-        if (selectedPath === "reimburse") return reimburseAudit.has(row.entity);
-        return false;
-      });
-      if (!rows.length) {
-        auditsEl.textContent = "暂无";
+      loadAudit(auditsEl);
+    }
+
+    document.querySelector("#audit-query").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const input = event.target.querySelector("[name=docNo]");
+      auditDocNo = input ? input.value.trim() : "";
+      loadAudit(auditsEl);
+    });
+
+    async function loadAudit(result) {
+      const docNo = auditDocNo.trim();
+      result.replaceChildren();
+      if (!docNo) {
+        const empty = document.createElement("p");
+        empty.className = "meta";
+        empty.textContent = "输入单号后查询。";
+        result.append(empty);
         return;
       }
-      const table = document.createElement("table");
-      const head = document.createElement("tr");
-      for (const label of ["时间", "对象", "迁移", "说明"]) {
-        const th = document.createElement("th");
-        th.textContent = label;
-        head.append(th);
-      }
-      table.append(head);
-      for (const row of rows.slice().reverse()) {
-        const tr = document.createElement("tr");
-        const cells = [
-          row.at.replace("T", " ").slice(0, 19),
-          row.entity + " " + row.entityId,
-          (row.fromStatus || "—") + " → " + (row.toStatus || "—") + (row.skipped ? " · 跳过 " + (row.skippedReason || "") : "") + (row.sodViolationCode ? " · " + row.sodViolationCode : ""),
-          row.comment,
-        ];
-        for (const text of cells) {
-          const td = document.createElement("td");
-          td.textContent = text;
-          tr.append(td);
+      try {
+        const data = await api("/api/audit?docNo=" + encodeURIComponent(docNo));
+        const title = document.createElement("p");
+        title.className = "meta";
+        title.textContent = auditObjectLabel(data.entity, data.docNo) + " · " + statusLabel(data.status);
+        result.append(title);
+        const rows = data.audits || [];
+        if (!rows.length) {
+          const empty = document.createElement("p");
+          empty.className = "meta";
+          empty.textContent = "这张单据还没有流转记录。";
+          result.append(empty);
+          return;
         }
-        table.append(tr);
+        const table = document.createElement("table");
+        const head = document.createElement("tr");
+        for (const label of ["时间", "对象", "迁移", "说明"]) {
+          const th = document.createElement("th");
+          th.textContent = label;
+          head.append(th);
+        }
+        table.append(head);
+        for (const row of rows.slice().reverse()) {
+          const view = presentAuditRow(row);
+          const tr = document.createElement("tr");
+          const cells = [
+            String(row.at || "").replace("T", " ").slice(0, 19),
+            view.object,
+            view.move,
+            view.comment,
+          ];
+          for (const text of cells) {
+            const td = document.createElement("td");
+            td.textContent = text;
+            tr.append(td);
+          }
+          table.append(tr);
+        }
+        result.append(table);
+      } catch (error) {
+        const fail = document.createElement("p");
+        fail.className = "meta";
+        fail.textContent = error.message;
+        result.append(fail);
       }
-      auditsEl.append(table);
     }
 
     function appendLineImages(parent, lines) {
@@ -1848,7 +2091,7 @@
       const form = document.querySelector("#edit-form");
       const titles = { PR: "编辑请购", PRE: "编辑事前申请", EXP: "编辑报销", PREPAY: "编辑预付" };
       title.textContent = (titles[entity] || "编辑单据") + " · " + doc.docNo;
-      const reason = typeof doc.rejectReason === "string" ? doc.rejectReason.trim() : "";
+      const reason = doc.status === "rejected" && typeof doc.rejectReason === "string" ? doc.rejectReason.trim() : "";
       if (reason) {
         reasonBox.hidden = false;
         reasonBox.textContent = "驳回理由：" + reason;
@@ -2036,6 +2279,11 @@
         rememberPath(id);
         notice("", "");
         applyPathView();
+        renderDocs();
+        return;
+      }
+      if (act === "toggle-ended") {
+        showEnded = !showEnded;
         renderDocs();
         return;
       }

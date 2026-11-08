@@ -165,7 +165,7 @@ export interface PurchaseRequisition {
   rfqWaiverKind: RfqWaiverKind | null;
   rfqWaived: boolean;
   waiveReason: string | null;
-  /** 最近一次驳回理由。重新提交后清空。 */
+  /** 最近一次驳回理由。重新提交或取消后清空；已取消及其他终态不再展示。 */
   rejectReason: string | null;
   /** 行全部为 low_value 时为低值易耗单据（Q7）。 */
   docType: PrDocType;
@@ -373,7 +373,7 @@ export interface PrepayRequest {
   attachments: PrepayAttachment[];
   contractNo: string | null;
   proformaInvoiceId: string | null;
-  /** 最近一次驳回理由。重新提交后清空。 */
+  /** 最近一次驳回理由。重新提交或取消后清空；已取消及其他终态不再展示。 */
   rejectReason: string | null;
   createdAt: string;
   updatedAt: string;
@@ -463,7 +463,7 @@ export interface PreApproval {
   purpose: string;
   deptApproverId: string | null;
   consumedByExpenseId: string | null;
-  /** 最近一次驳回理由。重新提交后清空。 */
+  /** 最近一次驳回理由。重新提交或取消后清空；已取消及其他终态不再展示。 */
   rejectReason: string | null;
   createdAt: string;
   updatedAt: string;
@@ -491,7 +491,7 @@ export interface ExpenseClaim {
   financeGate: Gate;
   paidAt: string | null;
   bankRef: string | null;
-  /** 最近一次驳回理由。重新提交后清空。 */
+  /** 最近一次驳回理由。重新提交或取消后清空；已取消及其他终态不再展示。 */
   rejectReason: string | null;
   createdAt: string;
   updatedAt: string;
