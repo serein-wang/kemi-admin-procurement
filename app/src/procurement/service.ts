@@ -489,6 +489,7 @@ export class ProcurementService {
     const from = pr.status;
     if (pr.reserveStatus === "soft") this.releaseSoft(actor, pr, "pr_cancelled");
     pr.status = "cancelled";
+    pr.rejectReason = null;
     pr.updatedAt = this.now();
     this.audit({
       entity: "PR",
@@ -1692,6 +1693,7 @@ export class ProcurementService {
     prepay.proformaInvoiceId = null;
     if (invoiceId) this.removeProformaIfUnused(invoiceId, prepay.id);
     prepay.status = "cancelled";
+    prepay.rejectReason = null;
     prepay.updatedAt = this.now();
     this.audit({
       entity: "PREPAY",
@@ -2414,6 +2416,7 @@ export class ProcurementService {
     if (pre.consumedByExpenseId) this.fail("PRE_ALREADY_CONSUMED", "事前申请已被报销占用", 409);
     const from = pre.status;
     pre.status = "cancelled";
+    pre.rejectReason = null;
     pre.updatedAt = this.now();
     this.audit({
       entity: "PRE",
@@ -2622,6 +2625,7 @@ export class ProcurementService {
     }
     const from = expense.status;
     expense.status = "cancelled";
+    expense.rejectReason = null;
     expense.updatedAt = this.now();
     const pre = this.store.pres.get(expense.preApprovalId);
     if (pre && pre.consumedByExpenseId === expense.id) {
@@ -2811,6 +2815,40 @@ export class ProcurementService {
   }
 
   /** 当前用户待办。驳回单只出现在申请人队列。 */
+  /** 单号或 id。走查按单号查询只命中这一张，不返回别的单据的关卡。 */
+  private locateDoc(docNo: string): {
+    entity: AuditLog["entity"];
+    entityId: string;
+    docNo: string;
+    status: string;
+  } | null {
+    const needle = docNo.trim();
+    if (!needle) return null;
+    const hits: Array<{ entity: AuditLog["entity"]; entityId: string; docNo: string; status: string }> = [];
+    const take = (
+      entity: AuditLog["entity"],
+      row: { id: string; docNo?: string; status: string } | undefined,
+    ) => {
+      if (!row) return;
+      if (row.id === needle || row.docNo === needle) {
+        hits.push({ entity, entityId: row.id, docNo: row.docNo || row.id, status: row.status });
+      }
+    };
+    for (const row of this.store.prs.values()) take("PR", row);
+    for (const row of this.store.pos.values()) take("PO", row);
+    for (const row of this.store.prepays.values()) take("PREPAY", row);
+    for (const row of this.store.pres.values()) take("PRE", row);
+    for (const row of this.store.expenses.values()) take("EXP", row);
+    for (const row of this.store.payments.values()) take("PAY", row);
+    for (const row of this.store.assets.values()) {
+      if (row.id === needle || row.docNo === needle || row.assetNo === needle) {
+        hits.push({ entity: "ASSET", entityId: row.id, docNo: row.docNo || row.assetNo, status: row.status });
+      }
+    }
+    for (const row of this.store.grns.values()) take("GRN", row);
+    return hits[0] ?? null;
+  }
+
   listTodos(userId: string): TodoItem[] {
     const actor = this.requireUser(userId);
     const roles = new Set(this.store.rolesOf(actor.id));
@@ -2860,6 +2898,24 @@ export class ProcurementService {
       .filter((row) => (filter.entity ? row.entity === filter.entity : true))
       .filter((row) => (filter.entityId ? row.entityId === filter.entityId : true))
       .map((row) => clone(row));
+  }
+
+  /**
+   * 按单号取这一张单据的流转。关卡和预算明细留在单据本身，走查页不整表倒出来。
+   */
+  auditByDocNo(docNo: string): {
+    entity: AuditLog["entity"];
+    entityId: string;
+    docNo: string;
+    status: string;
+    audits: AuditLog[];
+  } {
+    const found = this.locateDoc(docNo);
+    if (!found) this.fail("NOT_FOUND", "没有这个单号", 404);
+    return {
+      ...found,
+      audits: this.listAudit({ entity: found.entity, entityId: found.entityId }),
+    };
   }
 
   workspace(): {

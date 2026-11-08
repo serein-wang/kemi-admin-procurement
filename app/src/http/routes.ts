@@ -205,7 +205,9 @@ export async function registerRoutes(
 
   app.get("/api/audit", async (request) => {
     requireSession(request);
-    const query = request.query as { entity?: string; entityId?: string };
+    const query = request.query as { entity?: string; entityId?: string; docNo?: string };
+    const docNo = typeof query.docNo === "string" ? query.docNo.trim() : "";
+    if (docNo) return handle.service.auditByDocNo(docNo);
     return { audits: handle.service.listAudit({ entity: query.entity, entityId: query.entityId }) };
   });
 
